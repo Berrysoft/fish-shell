@@ -386,7 +386,7 @@ impl BackgroundFdMonitor {
                     .map(|duration| duration.as_micros() as u64)
                     .unwrap_or(FdReadableSet::kNoTimeout),
             );
-            if ret < 0 && !matches!(errno().0, libc::EINTR | libc::EBADF) {
+            if ret < 0 && !matches!(errno().0, libc::EINTR | libc::EBADF | 0) {
                 // Surprising error
                 perror("select");
             }
