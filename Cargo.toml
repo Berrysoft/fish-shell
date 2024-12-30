@@ -9,6 +9,7 @@ edition = "2021"
 
 [profile.release]
 overflow-checks = true
+codegen-units = 1
 lto = true
 
 [profile.release-with-debug]
@@ -29,7 +30,7 @@ homepage = "https://fishshell.com"
 readme = "README.rst"
 
 [dependencies]
-pcre2 = { git = "https://github.com/fish-shell/rust-pcre2", tag = "0.2.9-utf32", default-features = false, features = [
+pcre2 = { git = "https://github.com/Berrysoft/rust-pcre2.git", branch = "dev/cygwin", default-features = false, features = [
     "utf32",
 ] }
 
@@ -59,6 +60,7 @@ widestring = "1.1.0"
 # We need 0.9.0 specifically for some crash fixes.
 terminfo = "0.9.0"
 rust-embed = { version = "8.2.0", optional = true }
+unicode-width = "0.2.0"
 
 [target.'cfg(not(target_has_atomic = "64"))'.dependencies]
 portable-atomic = { version = "1", default-features = false, features = [
@@ -105,3 +107,8 @@ rust.unstable_name_collisions = "allow"
 clippy.manual_range_contains = "allow"
 clippy.needless_return = "allow"
 clippy.needless_lifetimes = "allow"
+
+[patch.crates-io]
+libc = { git = "https://github.com/Berrysoft/libc.git", branch = "dev/cygwin" }
+cc = { git = "https://github.com/Berrysoft/cc-rs.git", branch = "dev/cygwin" }
+nix = { git = "https://github.com/Berrysoft/nix.git", branch = "dev/cygwin" }

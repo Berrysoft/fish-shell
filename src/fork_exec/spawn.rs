@@ -114,7 +114,10 @@ impl PosixSpawner {
 
         // Set our flags.
         let mut flags: i32 = 0;
-        flags |= libc::POSIX_SPAWN_SETSIGDEF;
+        #[cfg(not(target_os = "cygwin"))]
+        {
+            flags |= libc::POSIX_SPAWN_SETSIGDEF;
+        }
         flags |= libc::POSIX_SPAWN_SETSIGMASK;
         if desired_pgid.is_some() {
             flags |= libc::POSIX_SPAWN_SETPGROUP;
@@ -160,6 +163,10 @@ impl PosixSpawner {
             return Ok(pid);
         }
         let spawn_err = spawned.unwrap_err();
+        println!(
+            "spawn err: {:?}, {}, {:p}, {:p}, {:p}, {:p}, {:p}",
+            spawn_err, pid, cmd, argv, envp, self.actions.0, self.attr.0
+        );
 
         // The shebang wasn't introduced until UNIX Seventh Edition, so if
         // the kernel won't run the binary we hand it off to the interpreter

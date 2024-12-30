@@ -149,47 +149,9 @@ fn detect_bsd(_: &Target) -> Result<bool, Box<dyn Error>> {
 
 /// Detect libintl/gettext and its needed symbols to enable internationalization/localization
 /// support.
-fn have_gettext(target: &Target) -> Result<bool, Box<dyn Error>> {
-    // The following script correctly detects and links against gettext, but so long as we are using
-    // C++ and generate a static library linked into the C++ binary via CMake, we need to account
-    // for the CMake option WITH_GETTEXT being explicitly disabled.
-    rsconf::rebuild_if_env_changed("CMAKE_WITH_GETTEXT");
-    if let Some(with_gettext) = std::env::var_os("CMAKE_WITH_GETTEXT") {
-        if with_gettext.eq_ignore_ascii_case("0") {
-            return Ok(false);
-        }
-    }
-
-    // In order for fish to correctly operate, we need some way of notifying libintl to invalidate
-    // its localizations when the locale environment variables are modified. Without the libintl
-    // symbol _nl_msg_cat_cntr, we cannot use gettext even if we find it.
-    let mut libraries = Vec::new();
-    let mut found = 0;
-    let symbols = ["gettext", "_nl_msg_cat_cntr"];
-    for symbol in &symbols {
-        // Historically, libintl was required in order to use gettext() and co, but that
-        // functionality was subsumed by some versions of libc.
-        if target.has_symbol(symbol) {
-            // No need to link anything special for this symbol
-            found += 1;
-            continue;
-        }
-        for library in ["intl", "gettextlib"] {
-            if target.has_symbol_in(symbol, &[library]) {
-                libraries.push(library);
-                found += 1;
-                continue;
-            }
-        }
-    }
-    match found {
-        0 => Ok(false),
-        1 => Err(format!("gettext found but cannot be used without {}", symbols[1]).into()),
-        _ => {
-            rsconf::link_libraries(&libraries, LinkType::Default);
-            Ok(true)
-        }
-    }
+fn have_gettext(_target: &Target) -> Result<bool, Box<dyn Error>> {
+    rsconf::link_libraries(&["intl"], LinkType::Default);
+    Ok(true)
 }
 
 /// Rust sets the stack size of newly created threads to a sane value, but is at at the mercy of the

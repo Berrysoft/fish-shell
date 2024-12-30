@@ -1134,7 +1134,6 @@ pub fn str2wcstring(inp: &[u8]) -> WString {
             // TODO This check used to be conditionally compiled only on affected platforms.
             true
         } else {
-            const _: () = assert!(mem::size_of::<libc::wchar_t>() == mem::size_of::<char>());
             let mut codepoint = u32::from(c);
             ret = unsafe {
                 mbrtowc(
@@ -1341,9 +1340,7 @@ pub fn fish_setlocale() {
 fn can_be_encoded(wc: char) -> bool {
     let mut converted = [0 as libc::c_char; AT_LEAST_MB_LEN_MAX];
     let mut state = zero_mbstate();
-    unsafe {
-        wcrtomb(converted.as_mut_ptr(), wc as libc::wchar_t, &mut state) != 0_usize.wrapping_sub(1)
-    }
+    unsafe { wcrtomb(converted.as_mut_ptr(), wc, &mut state) != 0_usize.wrapping_sub(1) }
 }
 
 /// Call read, blocking and repeating on EINTR. Exits on EAGAIN.

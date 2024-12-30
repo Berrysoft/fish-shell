@@ -241,13 +241,7 @@ fn test_convert_private_use() {
         // specially.
         let mut converted = [0_u8; AT_LEAST_MB_LEN_MAX];
         let mut state = zero_mbstate();
-        let len = unsafe {
-            wcrtomb(
-                std::ptr::addr_of_mut!(converted[0]).cast(),
-                c as libc::wchar_t,
-                &mut state,
-            )
-        };
+        let len = unsafe { wcrtomb(std::ptr::addr_of_mut!(converted[0]).cast(), c, &mut state) };
         if len == 0_usize.wrapping_sub(1) {
             // Could not be encoded in this locale.
             continue;
