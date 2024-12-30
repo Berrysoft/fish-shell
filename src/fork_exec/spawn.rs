@@ -163,10 +163,6 @@ impl PosixSpawner {
             return Ok(pid);
         }
         let spawn_err = spawned.unwrap_err();
-        println!(
-            "spawn err: {:?}, {}, {:p}, {:p}, {:p}, {:p}, {:p}",
-            spawn_err, pid, cmd, argv, envp, self.actions.0, self.attr.0
-        );
 
         // The shebang wasn't introduced until UNIX Seventh Edition, so if
         // the kernel won't run the binary we hand it off to the interpreter

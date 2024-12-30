@@ -39,12 +39,20 @@ pub unsafe fn mbrtowc(
     if n == 0 {
         return 0;
     }
+    if s.is_null() {
+        return 0;
+    }
     let s = core::slice::from_raw_parts(s.cast::<u8>(), n);
     let max_len = s.len().min(4);
     for len in 1..=max_len {
         if let Ok(st) = std::str::from_utf8(&s[..len]) {
-            *pwc = st.chars().next().unwrap();
-            return len;
+            let c = st.chars().next().unwrap();
+            *pwc = c;
+            if c == '\0' {
+                return 0;
+            } else {
+                return len;
+            }
         }
     }
     if max_len >= 4 {

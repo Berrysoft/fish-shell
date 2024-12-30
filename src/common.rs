@@ -1134,32 +1134,25 @@ pub fn str2wcstring(inp: &[u8]) -> WString {
             // TODO This check used to be conditionally compiled only on affected platforms.
             true
         } else {
-            let mut codepoint = u32::from(c);
             ret = unsafe {
                 mbrtowc(
-                    std::ptr::addr_of_mut!(codepoint).cast(),
+                    std::ptr::addr_of_mut!(c),
                     std::ptr::addr_of!(inp[pos]).cast(),
                     inp.len() - pos,
                     &mut state,
                 )
             };
-            match char::from_u32(codepoint) {
-                Some(codepoint) => {
-                    c = codepoint;
-                    // Determine whether to encode this character with our crazy scheme.
-                    fish_reserved_codepoint(c)
-                    ||
-                    // Incomplete sequence.
-                    ret == 0_usize.wrapping_sub(2)
-                    ||
-                    // Invalid data.
-                    ret == 0_usize.wrapping_sub(1)
-                    ||
-                    // Other error codes? Terrifying, should never happen.
-                    ret > inp.len() - pos
-                }
-                None => true,
-            }
+            // Determine whether to encode this character with our crazy scheme.
+            fish_reserved_codepoint(c)
+            ||
+            // Incomplete sequence.
+            ret == 0_usize.wrapping_sub(2)
+            ||
+            // Invalid data.
+            ret == 0_usize.wrapping_sub(1)
+            ||
+            // Other error codes? Terrifying, should never happen.
+            ret > inp.len() - pos
         };
 
         if use_encode_direct {
