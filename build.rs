@@ -6,7 +6,11 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    setup_paths();
+    if !cfg!(windows) {
+        setup_paths();
+    } else {
+        rsconf::set_env_value("DATADIR_SUBDIR", "fish");
+    }
 
     // Add our default to enable tools that don't go through CMake, like "cargo test" and the
     // language server.

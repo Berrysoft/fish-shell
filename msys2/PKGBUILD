@@ -29,9 +29,11 @@ build() {
   cd build
 
   export CXXFLAGS+=" ${CPPFLAGS}"
+  export MSYS2_ARG_CONV_EXCL='*'
+  export MSYS2_ENV_CONV_EXCL='DOCDIR;DATADIR;SYSCONFDIR;BINDIR;LOCALEDIR'
   cmake ../../.. \
     -DCMAKE_INSTALL_PREFIX=/usr \
-    -DCMAKE_INSTALL_SYSCONFDIR=/usr/etc \
+    -DCMAKE_INSTALL_SYSCONFDIR=/etc \
     -DCMAKE_BUILD_TYPE=Release \
     -DRust_CARGO_TARGET=x86_64-pc-cygwin \
     -Wno-dev
@@ -44,8 +46,8 @@ package() {
 
   make DESTDIR="${pkgdir}" install
 
-  install -D -m644 "${srcdir}/config.fish" "${pkgdir}/usr/etc/fish/config.fish"
-  install -D -m644 "${srcdir}/msys2.fish" "${pkgdir}/usr/etc/fish/msys2.fish"
-  install -D -m644 "${srcdir}/msystem.fish" "${pkgdir}/usr/etc/fish/msystem.fish"
-  install -D -m644 "${srcdir}/perlbin.fish" "${pkgdir}/usr/etc/fish/perlbin.fish"
+  install -D -m644 "${srcdir}/config.fish" "${pkgdir}/etc/fish/config.fish"
+  install -D -m644 "${srcdir}/msys2.fish" "${pkgdir}/etc/fish/msys2.fish"
+  install -D -m644 "${srcdir}/msystem.fish" "${pkgdir}/etc/fish/msystem.fish"
+  install -D -m644 "${srcdir}/perlbin.fish" "${pkgdir}/etc/fish/perlbin.fish"
 }
