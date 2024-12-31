@@ -29,13 +29,13 @@ build() {
   cd build
 
   export CXXFLAGS+=" ${CPPFLAGS}"
-  export MSYS2_ARG_CONV_EXCL='*'
   export MSYS2_ENV_CONV_EXCL='DOCDIR;DATADIR;SYSCONFDIR;BINDIR;LOCALEDIR'
-  cmake ../../.. \
+  MSYS2_ARG_CONV_EXCL='*' cmake ../../.. \
     -DCMAKE_INSTALL_PREFIX=/usr \
     -DCMAKE_INSTALL_SYSCONFDIR=/etc \
     -DCMAKE_BUILD_TYPE=Release \
     -DRust_CARGO_TARGET=x86_64-pc-cygwin \
+    -DBUILD_DOCS=True \
     -Wno-dev
 
   make VERBOSE=1
