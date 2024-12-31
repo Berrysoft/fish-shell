@@ -1359,9 +1359,7 @@ pub fn valid_func_name(name: &wstr) -> bool {
 
 /// A rusty port of the C++ `write_loop()` function from `common.cpp`. This should be deprecated in
 /// favor of native rust read/write methods at some point.
-///
-/// Returns the number of bytes written or an IO error.
-pub fn write_loop<Fd: AsRawFd>(fd: &Fd, buf: &[u8]) -> std::io::Result<usize> {
+pub fn write_loop<Fd: AsRawFd>(fd: &Fd, buf: &[u8]) -> std::io::Result<()> {
     let fd = fd.as_raw_fd();
     let mut total = 0;
     while total < buf.len() {
@@ -1377,7 +1375,7 @@ pub fn write_loop<Fd: AsRawFd>(fd: &Fd, buf: &[u8]) -> std::io::Result<usize> {
             }
         }
     }
-    Ok(total)
+    Ok(())
 }
 
 /// A rusty port of the C++ `read_loop()` function from `common.cpp`. This should be deprecated in

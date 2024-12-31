@@ -16,6 +16,9 @@ Interactive improvements
 New or improved bindings
 ^^^^^^^^^^^^^^^^^^^^^^^^
 - :kbd:`ctrl-z` (undo) after executing a command will restore the previous cursor position instead of placing the cursor at the end of the command line.
+- The OSC 133 prompt marking feature has learned about kitty's ``click_events=1`` flag, which allows moving fish's cursor by clicking.
+- :kbd:`ctrl-l` no longer clears the screen but only pushes to the terminal's scrollback all text above the prompt (via a new special input function ``scrollback-push``).
+  You can restore previous behavior with `bind ctrl-l clear-screen`.
 
 Completions
 ^^^^^^^^^^^
@@ -49,7 +52,7 @@ Notable backwards-incompatible changes
 - Terminals that fail to ignore unrecognized OSC or CSI sequences may display garbage. We know cool-retro-term and emacs' ansi-term are affected,
   most mainstream terminals are not.
 - :kbd:`alt-left` and :kbd:`alt-right` will now move by one argument (which may contain quoted spaces), not just one word like :kbd:`ctrl-left` and :kbd:`ctrl-right` do.
-- :kbd:`alt-backspace` will delete an entire argument, not just one word (which is :kbd:`ctrl-backspace` now).
+- :kbd:`alt-backspace` will delete an entire argument, not just one word. The old word behavior has been moved to :kbd:`ctrl-backspace`. If your terminal doesn't support `ctrl-backspace`, consider using :kbd:`ctrl-w`, or :kbd:`alt-b` + :kbd:`alt-d`.
 - ``random`` will produce different values from previous versions of fish when used with the same seed, and will work more sensibly with small seed numbers.
   The seed was never guaranteed to give the same result across systems,
   so we do not expect this to have a large impact (:issue:`9593`).

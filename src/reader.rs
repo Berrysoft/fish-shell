@@ -22,6 +22,7 @@ use nix::sys::stat::Mode;
 use once_cell::sync::Lazy;
 #[cfg(not(target_has_atomic = "64"))]
 use portable_atomic::AtomicU64;
+use std::borrow::Cow;
 use std::cell::UnsafeCell;
 use std::cmp;
 use std::io::BufReader;
@@ -57,6 +58,7 @@ use crate::complete::{
     complete, complete_load, sort_and_prioritize, CompleteFlags, Completion, CompletionList,
     CompletionRequestOptions,
 };
+use crate::editable_line::line_at_cursor;
 use crate::editable_line::{Edit, EditableLine};
 use crate::env::{EnvMode, Environment, Statuses};
 use crate::exec::exec_subshell;
@@ -77,12 +79,16 @@ use crate::history::{
 };
 use crate::input::init_input;
 use crate::input_common::terminal_protocols_disable_ifn;
+use crate::input_common::ImplicitEvent;
+use crate::input_common::InputEventQueuer;
+use crate::input_common::WaitingForCursorPosition;
 use crate::input_common::IN_MIDNIGHT_COMMANDER_PRE_CSI_U;
 use crate::input_common::{
     terminal_protocol_hacks, terminal_protocols_enable_ifn, CharEvent, CharInputStyle, InputData,
     ReadlineCmd,
 };
 use crate::io::IoChain;
+use crate::key::ViewportPosition;
 use crate::kill::{kill_add, kill_replace, kill_yank, kill_yank_rotate};
 use crate::libc::MB_CUR_MAX;
 use crate::nix::isatty;
@@ -130,7 +136,7 @@ use crate::wcstringutil::{
     string_prefixes_string_case_insensitive, StringFuzzyMatch,
 };
 use crate::wildcard::wildcard_has;
-use crate::wutil::{fstat, perror, write_to_fd};
+use crate::wutil::{fstat, perror};
 use crate::{abbrs, event, function, history};
 
 /// A description of where fish is in the process of exiting.
@@ -494,6 +500,8 @@ pub struct ReaderData {
     /// The representation of the current screen contents.
     screen: Screen,
 
+    pub waiting_for_cursor_position: Option<WaitingForCursorPosition>,
+
     /// Data associated with input events.
     /// This is made public so that InputEventQueuer can be implemented on us.
     pub input_data: InputData,
@@ -646,9 +654,8 @@ fn read_i(parser: &Parser) -> i32 {
             continue;
         }
 
-        data.command_line.clear();
+        data.clear(EditableLineTag::Commandline);
         data.update_buff_pos(EditableLineTag::Commandline, None);
-        data.command_line_changed(EditableLineTag::Commandline);
         // OSC 133 End of command
         data.screen.write_bytes(b"\x1b]133;C\x07");
         event::fire_generic(parser, L!("fish_preexec").to_owned(), vec![command.clone()]);
@@ -1145,6 +1152,7 @@ impl ReaderData {
             first_prompt: true,
             last_flash: Default::default(),
             screen: Screen::new(),
+            waiting_for_cursor_position: None,
             input_data,
             queued_repaint: false,
             history,
@@ -1238,6 +1246,9 @@ impl ReaderData {
                     );
                     return;
                 }
+                if self.pager.is_empty() {
+                    return;
+                }
                 self.pager.refilter_completions();
                 self.pager_selection_changed();
             }
@@ -1303,13 +1314,6 @@ impl ReaderData {
         }
     }
 
-    fn maybe_refilter_pager(&mut self, elt: EditableLineTag) {
-        match elt {
-            EditableLineTag::Commandline => (),
-            EditableLineTag::SearchField => self.command_line_changed(elt),
-        }
-    }
-
     /// Update the cursor position.
     fn update_buff_pos(&mut self, elt: EditableLineTag, mut new_pos: Option<usize>) -> bool {
         if self.cursor_end_mode == CursorEndMode::Inclusive {
@@ -1347,6 +1351,30 @@ impl ReaderData {
             selection.stop = selection.begin + target_char;
         }
         true
+    }
+
+    pub fn request_cursor_position(
+        &mut self,
+        waiting_for_cursor_position: WaitingForCursorPosition,
+    ) {
+        assert!(self.waiting_for_cursor_position.is_none());
+        self.waiting_for_cursor_position = Some(waiting_for_cursor_position);
+        self.screen.write_bytes(b"\x1b[6n");
+    }
+
+    pub fn mouse_left_click(&mut self, cursor: ViewportPosition, click_position: ViewportPosition) {
+        FLOG!(
+            reader,
+            "Cursor is at",
+            cursor,
+            "; received left mouse click at",
+            click_position
+        );
+        let new_pos = self
+            .screen
+            .offset_in_cmdline_given_cursor(click_position, cursor);
+        let (elt, _el) = self.active_edit_line();
+        self.update_buff_pos(elt, Some(new_pos));
     }
 }
 
@@ -1575,25 +1603,29 @@ impl ReaderData {
     /// using syntax highlighting, etc.
     /// Returns true if the string changed.
     fn insert_string(&mut self, elt: EditableLineTag, s: &wstr) {
-        if !s.is_empty() {
-            let history_search_active = self.history_search.active();
-            let el = self.edit_line_mut(elt);
-            el.push_edit(
-                Edit::new(el.position()..el.position(), s.to_owned()),
-                /*allow_coalesce=*/ !history_search_active,
-            );
-        }
-
+        let history_search_active = self.history_search.active();
+        let el = self.edit_line(elt);
+        self.push_edit_internal(
+            elt,
+            Edit::new(el.position()..el.position(), s.to_owned()),
+            /*allow_coalesce=*/ !history_search_active,
+        );
         if elt == EditableLineTag::Commandline {
             self.command_line_has_transient_edit = false;
             self.suppress_autosuggestion = false;
         }
-        self.maybe_refilter_pager(elt);
     }
 
     /// Erase @length characters starting at @offset.
     fn erase_substring(&mut self, elt: EditableLineTag, range: Range<usize>) {
         self.push_edit(elt, Edit::new(range, L!("").to_owned()));
+    }
+
+    fn clear(&mut self, elt: EditableLineTag) {
+        let el = self.edit_line(elt);
+        if !el.is_empty() {
+            self.erase_substring(elt, 0..el.len());
+        }
     }
 
     /// Replace the text of length @length at @offset by @replacement.
@@ -1607,9 +1639,7 @@ impl ReaderData {
     }
 
     fn push_edit(&mut self, elt: EditableLineTag, edit: Edit) {
-        self.edit_line_mut(elt)
-            .push_edit(edit, /*allow_coalesce=*/ false);
-        self.maybe_refilter_pager(elt);
+        self.push_edit_internal(elt, edit, /*allow_coalesce=*/ false);
     }
 
     /// Insert the character into the command line buffer and print it to the screen using syntax
@@ -1628,6 +1658,11 @@ impl ReaderData {
         self.push_edit(elt, Edit::new(0..self.edit_line(elt).len(), new_str));
         self.edit_line_mut(elt).set_position(pos);
         self.update_buff_pos(elt, Some(pos));
+    }
+
+    fn push_edit_internal(&mut self, elt: EditableLineTag, edit: Edit, allow_coalesce: bool) {
+        self.edit_line_mut(elt).push_edit(edit, allow_coalesce);
+        self.command_line_changed(elt);
     }
 
     /// Undo the transient edit und update commandline accordingly.
@@ -1979,7 +2014,7 @@ impl<'a> Reader<'a> {
         // HACK: If stdin isn't the same terminal as stdout, we just moved the cursor.
         // For now, just reset it to the beginning of the line.
         if zelf.conf.inputfd != STDIN_FILENO {
-            let _ = write_to_fd(b"\r", STDOUT_FILENO);
+            let _ = write_loop(&STDOUT_FILENO, b"\r");
         }
 
         // Ensure we have no pager contents when we exit.
@@ -2161,22 +2196,16 @@ impl<'a> Reader<'a> {
         let Some(event_needing_handling) = event_needing_handling else {
             return ControlFlow::Continue(());
         };
-        if event_needing_handling.is_check_exit() {
-            return ControlFlow::Continue(());
-        } else if event_needing_handling.is_eof() {
-            reader_sighup();
-            return ControlFlow::Continue(());
-        }
-
-        if !matches!(
-            self.rls().last_cmd,
-            Some(ReadlineCmd::Yank | ReadlineCmd::YankPop)
-        ) {
-            self.rls_mut().yank_len = 0;
-        }
 
         match event_needing_handling {
             CharEvent::Readline(readline_cmd_evt) => {
+                if !matches!(
+                    self.rls().last_cmd,
+                    Some(ReadlineCmd::Yank | ReadlineCmd::YankPop)
+                ) {
+                    self.rls_mut().yank_len = 0;
+                }
+
                 let readline_cmd = readline_cmd_evt.cmd;
                 if readline_cmd == ReadlineCmd::Cancel && self.is_navigating_pager_contents() {
                     self.clear_transient_edit();
@@ -2230,9 +2259,31 @@ impl<'a> Reader<'a> {
                 }
                 self.rls_mut().last_cmd = None;
             }
-            CharEvent::Eof | CharEvent::CheckExit => {
-                panic!("Should have a char, readline or command")
-            }
+            CharEvent::Implicit(implicit_event) => match implicit_event {
+                ImplicitEvent::Eof => {
+                    reader_sighup();
+                }
+                ImplicitEvent::CheckExit => (),
+                ImplicitEvent::FocusIn => {
+                    event::fire_generic(self.parser, L!("fish_focus_in").to_owned(), vec![]);
+                }
+                ImplicitEvent::FocusOut => {
+                    event::fire_generic(self.parser, L!("fish_focus_out").to_owned(), vec![]);
+                }
+                ImplicitEvent::DisableMouseTracking => {
+                    Outputter::stdoutput()
+                        .borrow_mut()
+                        .write_wstr(L!("\x1B[?1000l"));
+                }
+                ImplicitEvent::MouseLeftClickContinuation(cursor, click_position) => {
+                    self.mouse_left_click(cursor, click_position);
+                    self.stop_waiting_for_cursor_position();
+                }
+                ImplicitEvent::ScrollbackPushContinuation(cursor_y) => {
+                    self.screen.push_to_scrollback(cursor_y);
+                    self.stop_waiting_for_cursor_position();
+                }
+            },
         }
         ControlFlow::Continue(())
     }
@@ -2741,7 +2792,7 @@ impl<'a> Reader<'a> {
                     let needle = if !cmdsub.contains('\n') {
                         cmdsub
                     } else {
-                        self.command_line.line_at_cursor()
+                        line_at_cursor(self.command_line.text(), self.command_line.position())
                     };
                     parse_util_escape_wildcards(needle)
                 } else {
@@ -3204,7 +3255,15 @@ impl<'a> Reader<'a> {
                 );
                 let (elt, el) = self.active_edit_line();
                 let mut replacement = WString::new();
-                while pos < el.position() {
+                while pos
+                    < if self.cursor_selection_mode == CursorSelectionMode::Inclusive
+                        && self.is_at_end(el)
+                    {
+                        el.len()
+                    } else {
+                        el.position()
+                    }
+                {
                     let chr = el.text().as_char_slice()[pos];
 
                     // We always change the case; this decides whether we go uppercase (true) or
@@ -3419,7 +3478,7 @@ impl<'a> Reader<'a> {
                     self.clear_pager();
                 }
                 self.update_buff_pos(elt, None);
-                self.maybe_refilter_pager(elt);
+                self.command_line_changed(elt);
             }
             rl::BeginUndoGroup => {
                 let (_elt, el) = self.active_edit_line_mut();
@@ -3428,17 +3487,6 @@ impl<'a> Reader<'a> {
             rl::EndUndoGroup => {
                 let (_elt, el) = self.active_edit_line_mut();
                 el.end_edit_group();
-            }
-            rl::DisableMouseTracking => {
-                Outputter::stdoutput()
-                    .borrow_mut()
-                    .write_wstr(L!("\x1B[?1000l"));
-            }
-            rl::FocusIn => {
-                event::fire_generic(self.parser, L!("fish_focus_in").to_owned(), vec![]);
-            }
-            rl::FocusOut => {
-                event::fire_generic(self.parser, L!("fish_focus_out").to_owned(), vec![]);
             }
             rl::ClearScreenAndRepaint => {
                 self.parser.libdata_mut().is_repaint = true;
@@ -3458,6 +3506,13 @@ impl<'a> Reader<'a> {
                 self.layout_and_repaint(L!("readline"));
                 self.force_exec_prompt_and_repaint = false;
                 self.parser.libdata_mut().is_repaint = false;
+            }
+            rl::ScrollbackPush => {
+                if self.waiting_for_cursor_position.is_some() {
+                    // TODO: re-queue it I guess.
+                    return;
+                }
+                self.request_cursor_position(WaitingForCursorPosition::ScrollbackPush);
             }
             rl::SelfInsert | rl::SelfInsertNotFirst | rl::FuncAnd | rl::FuncOr => {
                 // This can be reached via `commandline -f and` etc
@@ -3541,16 +3596,17 @@ impl<'a> Reader<'a> {
         // If the user hits return while navigating the pager, it only clears the pager.
         if self.is_navigating_pager_contents() {
             if self.history_pager.is_some() && self.pager.selected_completion_idx.is_none() {
-                self.data.command_line.push_edit(
-                    Edit::new(
-                        0..self.data.command_line.len(),
-                        self.data.pager.search_field_line.text().to_owned(),
-                    ),
-                    /*allow_coalesce=*/ false,
+                let range = 0..self.command_line.len();
+                let search_field = &self.data.pager.search_field_line;
+                let offset_from_end = search_field.len() - search_field.position();
+                let mut cursor = self.command_line.position();
+                let updated = replace_line_at_cursor(
+                    self.command_line.text(),
+                    &mut cursor,
+                    search_field.text(),
                 );
-                self.data
-                    .command_line
-                    .set_position(self.data.pager.search_field_line.position());
+                self.replace_substring(EditableLineTag::Commandline, range, updated);
+                self.command_line.set_position(cursor - offset_from_end);
             }
             self.clear_pager();
             return true;
@@ -3648,6 +3704,7 @@ impl ReaderData {
     fn clear_pager(&mut self) {
         self.pager.clear();
         self.history_pager = None;
+        self.clear(EditableLineTag::SearchField);
         self.command_line_has_transient_edit = false;
     }
 
@@ -3727,18 +3784,19 @@ impl ReaderData {
         let mut cursor_pos = self.cycle_cursor_pos;
 
         let new_cmd_line = match completion {
-            None => self.cycle_command_line.clone(),
-            Some(completion) => completion_apply_to_command_line(
+            None => Cow::Borrowed(&self.cycle_command_line),
+            Some(completion) => Cow::Owned(completion_apply_to_command_line(
                 &completion.completion,
                 completion.flags,
                 &self.cycle_command_line,
                 &mut cursor_pos,
                 false,
-            ),
+            )),
         };
 
         // Only update if something changed, to avoid useless edits in the undo history.
-        if new_cmd_line != self.command_line.text() {
+        if new_cmd_line.as_utfstr() != self.command_line.text() {
+            let new_cmd_line = new_cmd_line.into_owned();
             self.set_buffer_maintaining_pager(&new_cmd_line, cursor_pos, /*transient=*/ true);
         }
     }
@@ -3762,7 +3820,6 @@ impl ReaderData {
             0..self.command_line.len(),
             b.to_owned(),
         );
-        self.command_line_changed(EditableLineTag::Commandline);
 
         // Don't set a position past the command line length.
         if pos > command_line_len {
@@ -4134,7 +4191,7 @@ pub fn reader_write_title(
         .set_color(RgbColor::RESET, RgbColor::RESET);
     if reset_cursor_position && !lst.is_empty() {
         // Put the cursor back at the beginning of the line (issue #2453).
-        let _ = write_to_fd(b"\r", STDOUT_FILENO);
+        let _ = write_loop(&STDOUT_FILENO, b"\r");
     }
 }
 
@@ -4247,17 +4304,10 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// The result of an autosuggestion computation.
 #[derive(Default)]
 struct Autosuggestion {
-    // The text to use, as an extension of the command line.
+    // The text to use, as an extension/replacement of the command line.
     text: WString,
-
-    // The string which was searched for.
-    search_string: WString,
-
-    // The list of completions which may need loading.
-    needs_load: Vec<WString>,
 
     // Whether the autosuggestion should be case insensitive.
     // This is true for file-generated autosuggestions, but not for history.
@@ -4265,23 +4315,43 @@ struct Autosuggestion {
 }
 
 impl Autosuggestion {
-    fn new(text: WString, search_string: WString, icase: bool) -> Self {
-        Self {
-            text,
-            search_string,
-            needs_load: vec![],
-            icase,
-        }
-    }
     // Clear our contents.
     fn clear(&mut self) {
         self.text.clear();
-        self.search_string.clear();
     }
 
     // Return whether we have empty text.
     fn is_empty(&self) -> bool {
         self.text.is_empty()
+    }
+}
+
+/// The result of an autosuggestion computation.
+#[derive(Default)]
+struct AutosuggestionResult {
+    autosuggestion: Autosuggestion,
+
+    // The string which was searched for.
+    search_string: WString,
+
+    // The list of completions which may need loading.
+    needs_load: Vec<WString>,
+}
+
+impl std::ops::Deref for AutosuggestionResult {
+    type Target = Autosuggestion;
+    fn deref(&self) -> &Self::Target {
+        &self.autosuggestion
+    }
+}
+
+impl AutosuggestionResult {
+    fn new(text: WString, search_string: WString, icase: bool) -> Self {
+        Self {
+            autosuggestion: Autosuggestion { text, icase },
+            search_string,
+            needs_load: vec![],
+        }
     }
 }
 
@@ -4292,13 +4362,13 @@ fn get_autosuggestion_performer(
     search_string: WString,
     cursor_pos: usize,
     history: Arc<History>,
-) -> impl FnOnce() -> Autosuggestion {
+) -> impl FnOnce() -> AutosuggestionResult {
     let generation_count = read_generation_count();
     let vars = parser.vars().snapshot();
     let working_directory = parser.vars().get_pwd_slash();
     move || {
         assert_is_background_thread();
-        let nothing = Autosuggestion::default();
+        let nothing = AutosuggestionResult::default();
         let ctx = get_bg_context(&vars, generation_count);
         if ctx.check_cancel() {
             return nothing;
@@ -4323,7 +4393,7 @@ fn get_autosuggestion_performer(
             if autosuggest_validate_from_history(item, &working_directory, &ctx) {
                 // The command autosuggestion was handled specially, so we're done.
                 // History items are case-sensitive, see #3978.
-                return Autosuggestion::new(
+                return AutosuggestionResult::new(
                     searcher.current_string().to_owned(),
                     search_string.to_owned(),
                     /*icase=*/ false,
@@ -4354,22 +4424,26 @@ fn get_autosuggestion_performer(
         let complete_flags = CompletionRequestOptions::autosuggest();
         let (mut completions, needs_load) = complete(&search_string, complete_flags, &ctx);
 
-        let mut result = Autosuggestion::default();
-        result.search_string = search_string.to_owned();
-        result.needs_load = needs_load;
-        result.icase = true; // normal completions are case-insensitive
-        if !completions.is_empty() {
+        let full_line = if completions.is_empty() {
+            WString::new()
+        } else {
             sort_and_prioritize(&mut completions, complete_flags);
             let comp = &completions[0];
             let mut cursor = cursor_pos;
-            result.text = completion_apply_to_command_line(
+            completion_apply_to_command_line(
                 &comp.completion,
                 comp.flags,
                 &search_string,
                 &mut cursor,
                 /*append_only=*/ true,
-            );
-        }
+            )
+        };
+        let mut result = AutosuggestionResult::new(
+            full_line,
+            search_string.to_owned(),
+            true, // normal completions are case-insensitive
+        );
+        result.needs_load = needs_load;
         result
     }
 }
@@ -4395,7 +4469,7 @@ impl<'a> Reader<'a> {
     }
 
     // Called after an autosuggestion has been computed on a background thread.
-    fn autosuggest_completed(&mut self, result: Autosuggestion) {
+    fn autosuggest_completed(&mut self, result: AutosuggestionResult) {
         assert_is_main_thread();
         if result.search_string == self.data.in_flight_autosuggest_request {
             self.data.in_flight_autosuggest_request.clear();
@@ -4425,7 +4499,7 @@ impl<'a> Reader<'a> {
             && string_prefixes_string_case_insensitive(&result.search_string, &result.text)
         {
             // Autosuggestion is active and the search term has not changed, so we're good to go.
-            self.autosuggestion = result;
+            self.autosuggestion = result.autosuggestion;
             if self.is_repaint_needed(None) {
                 self.layout_and_repaint(L!("autosuggest"));
             }
@@ -4498,24 +4572,20 @@ impl<'a> Reader<'a> {
         self.clear_pager();
 
         // Accept the autosuggestion.
-        match amount {
+        let (range, replacement) = match amount {
             AutosuggestionPortion::Count(count) => {
                 let pos = self.command_line.len();
                 if count == usize::MAX {
-                    self.data.replace_substring(
-                        EditableLineTag::Commandline,
-                        0..self.command_line.len(),
-                        self.autosuggestion.text.clone(),
-                    );
+                    (0..self.command_line.len(), self.autosuggestion.text.clone())
                 } else {
                     let count = count.min(self.autosuggestion.text.len() - pos);
-                    if count != 0 {
-                        self.data.replace_substring(
-                            EditableLineTag::Commandline,
-                            pos..pos,
-                            self.autosuggestion.text[pos..pos + count].to_owned(),
-                        );
+                    if count == 0 {
+                        return;
                     }
+                    (
+                        pos..pos,
+                        self.autosuggestion.text[pos..pos + count].to_owned(),
+                    )
                 }
             }
             AutosuggestionPortion::PerMoveWordStyle(style) => {
@@ -4530,13 +4600,11 @@ impl<'a> Reader<'a> {
                     want += 1;
                 }
                 let have = self.command_line.len();
-                self.data.replace_substring(
-                    EditableLineTag::Commandline,
-                    have..have,
-                    self.autosuggestion.text[have..want].to_owned(),
-                );
+                (have..have, self.autosuggestion.text[have..want].to_owned())
             }
-        }
+        };
+        self.data
+            .replace_substring(EditableLineTag::Commandline, range, replacement);
     }
 }
 
@@ -5121,8 +5189,6 @@ fn command_ends_history_search(c: ReadlineCmd) -> bool {
             | rl::EndOfHistory
             | rl::Repaint
             | rl::ForceRepaint
-            | rl::FocusIn
-            | rl::FocusOut
     )
 }
 

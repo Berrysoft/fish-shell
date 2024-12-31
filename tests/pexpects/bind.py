@@ -22,6 +22,8 @@ send, sendline, sleep, expect_prompt, expect_re, expect_str = (
 )
 expect_prompt()
 
+sendline("bind ctrl-l repaint")
+expect_prompt()
 # Clear twice (regression test for #7280).
 send("\f")
 expect_prompt(increment=False)
@@ -240,6 +242,18 @@ expect_prompt("foo")
 # sleep(0.300)
 # send("hh~~bbve~\r")
 # expect_prompt(TO_END + "SOME TeXT\r\n", unmatched="Couldn't find expected output 'SOME TeXT")
+
+send("echo echo")
+send("\033")
+sleep(0.200)
+send("bgU\r")
+expect_prompt("echo ECHO")
+
+send("echo 125")
+send("\033")
+sleep(0.200)
+send("0$i34\r")
+expect_prompt("echo 12345")
 
 # Now test that exactly the expected bind modes are defined
 sendline("bind --list-modes")

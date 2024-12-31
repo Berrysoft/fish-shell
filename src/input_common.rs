@@ -2,23 +2,23 @@ use libc::STDOUT_FILENO;
 
 use crate::common::{
     fish_reserved_codepoint, is_windows_subsystem_for_linux, read_blocked, shell_modes,
-    str2wcstring, WSL,
+    str2wcstring, write_loop, WSL,
 };
 use crate::env::{EnvStack, Environment};
 use crate::fd_readable_set::FdReadableSet;
-use crate::flog::FLOG;
+use crate::flog::{FloggableDebug, FLOG};
 use crate::fork_exec::flog_safe::FLOG_SAFE;
 use crate::global_safety::RelaxedAtomicBool;
 use crate::key::{
-    self, alt, canonicalize_control_char, canonicalize_keyed_control_char, function_key, shift,
-    Key, Modifiers,
+    self, alt, canonicalize_control_char, canonicalize_keyed_control_char, ctrl, function_key,
+    shift, Key, Modifiers, ViewportPosition,
 };
 use crate::reader::{reader_current_data, reader_test_and_clear_interrupted};
 use crate::threads::{iothread_port, is_main_thread};
 use crate::universal_notifier::default_notifier;
 use crate::wchar::{encode_byte_to_char, prelude::*};
 use crate::wutil::encoding::{mbrtowc, mbstate_t, zero_mbstate};
-use crate::wutil::{fish_wcstol, write_to_fd};
+use crate::wutil::fish_wcstol;
 use std::collections::VecDeque;
 use std::ops::ControlFlow;
 use std::os::fd::RawFd;
@@ -130,11 +130,8 @@ pub enum ReadlineCmd {
     BeginUndoGroup,
     EndUndoGroup,
     RepeatJump,
-    DisableMouseTracking,
-    FocusIn,
-    FocusOut,
-    // ncurses uses the obvious name
     ClearScreenAndRepaint,
+    ScrollbackPush,
     // NOTE: This one has to be last.
     ReverseRepeatJump,
 }
@@ -181,6 +178,25 @@ pub struct KeyEvent {
 }
 
 #[derive(Debug, Clone)]
+pub enum ImplicitEvent {
+    /// end-of-file was reached.
+    Eof,
+    /// An event was handled internally, or an interrupt was received. Check to see if the reader
+    /// loop should exit.
+    CheckExit,
+    /// Our terminal window gained focus.
+    FocusIn,
+    /// Our terminal window lost focus.
+    FocusOut,
+    /// Request to disable mouse tracking.
+    DisableMouseTracking,
+    /// Handle mouse left click.
+    MouseLeftClickContinuation(ViewportPosition, ViewportPosition),
+    /// Push prompt to top.
+    ScrollbackPushContinuation(usize),
+}
+
+#[derive(Debug, Clone)]
 pub enum CharEvent {
     /// A character was entered.
     Key(KeyEvent),
@@ -191,25 +207,14 @@ pub enum CharEvent {
     /// A shell command.
     Command(WString),
 
-    /// end-of-file was reached.
-    Eof,
-
-    /// An event was handled internally, or an interrupt was received. Check to see if the reader
-    /// loop should exit.
-    CheckExit,
+    /// Any event that has no user-visible representation.
+    Implicit(ImplicitEvent),
 }
+impl FloggableDebug for CharEvent {}
 
 impl CharEvent {
     pub fn is_char(&self) -> bool {
         matches!(self, CharEvent::Key(_))
-    }
-
-    pub fn is_eof(&self) -> bool {
-        matches!(self, CharEvent::Eof)
-    }
-
-    pub fn is_check_exit(&self) -> bool {
-        matches!(self, CharEvent::CheckExit)
     }
 
     pub fn is_readline(&self) -> bool {
@@ -273,7 +278,7 @@ impl CharEvent {
     }
 
     pub fn from_check_exit() -> CharEvent {
-        CharEvent::CheckExit
+        CharEvent::Implicit(ImplicitEvent::CheckExit)
     }
 }
 
@@ -495,9 +500,9 @@ pub fn terminal_protocols_enable_ifn() {
         )
     };
     FLOG!(term_protocols, "Enabling extended keys and bracketed paste");
-    let _ = write_to_fd(sequences.as_bytes(), STDOUT_FILENO);
+    let _ = write_loop(&STDOUT_FILENO, sequences.as_bytes());
     if IS_TMUX.load() {
-        let _ = write_to_fd("\x1b[?1004h".as_bytes(), STDOUT_FILENO);
+        let _ = write_loop(&STDOUT_FILENO, "\x1b[?1004h".as_bytes());
     }
     reader_current_data().map(|data| data.save_screen_state());
 }
@@ -522,9 +527,9 @@ pub(crate) fn terminal_protocols_disable_ifn() {
         term_protocols,
         "Disabling extended keys and bracketed paste"
     );
-    let _ = write_to_fd(sequences.as_bytes(), STDOUT_FILENO);
+    let _ = write_loop(&STDOUT_FILENO, sequences.as_bytes());
     if IS_TMUX.load() {
-        let _ = write_to_fd("\x1b[?1004l".as_bytes(), STDOUT_FILENO);
+        let _ = write_loop(&STDOUT_FILENO, "\x1b[?1004l".as_bytes());
     }
     if is_main_thread() {
         reader_current_data().map(|data| data.save_screen_state());
@@ -586,11 +591,24 @@ impl InputData {
     }
 }
 
+pub enum WaitingForCursorPosition {
+    MouseLeft(ViewportPosition),
+    ScrollbackPush,
+}
+
 /// A trait which knows how to produce a stream of input events.
 /// Note this is conceptually a "base class" with override points.
 pub trait InputEventQueuer {
     /// Return the next event in the queue, or none if the queue is empty.
     fn try_pop(&mut self) -> Option<CharEvent> {
+        if self.is_waiting_for_cursor_position() {
+            match self.get_input_data().queue.front()? {
+                CharEvent::Key(_) | CharEvent::Readline(_) | CharEvent::Command(_) => {
+                    return None; // No code execution while we're waiting for CPR.
+                }
+                CharEvent::Implicit(_) => (),
+            }
+        }
         self.get_input_data_mut().queue.pop_front()
     }
 
@@ -631,7 +649,7 @@ pub trait InputEventQueuer {
             let rr = readb(self.get_in_fd(), blocking);
             match rr {
                 ReadbResult::Eof => {
-                    return Some(CharEvent::Eof);
+                    return Some(CharEvent::Implicit(ImplicitEvent::Eof));
                 }
 
                 ReadbResult::Interrupted => {
@@ -665,6 +683,7 @@ pub trait InputEventQueuer {
                     if key == Some(Key::from_raw(key::Invalid)) {
                         continue;
                     }
+                    assert!(key.map_or(true, |key| key.codepoint != key::Invalid));
                     let mut consumed = 0;
                     let mut state = zero_mbstate();
                     let mut i = 0;
@@ -698,15 +717,42 @@ pub trait InputEventQueuer {
                     if !ok {
                         continue;
                     }
-                    return if let Some(key) = key {
-                        Some(CharEvent::from_key_seq(key, seq))
+                    let (key_evt, extra) = if let Some(key) = key {
+                        (CharEvent::from_key_seq(key, seq), None)
                     } else {
-                        self.insert_front(seq.chars().skip(1).map(CharEvent::from_char));
                         let Some(c) = seq.chars().next() else {
                             continue;
                         };
-                        Some(CharEvent::from_key_seq(Key::from_raw(c), seq))
+                        (
+                            CharEvent::from_key_seq(Key::from_raw(c), seq.clone()),
+                            Some(seq.chars().skip(1).map(CharEvent::from_char)),
+                        )
                     };
+                    if self.is_waiting_for_cursor_position() {
+                        FLOG!(
+                            reader,
+                            "Still waiting for cursor position report from terminal, deferring key event",
+                            key_evt
+                        );
+                        self.push_back(key_evt);
+                        extra.map(|extra| {
+                            for evt in extra {
+                                self.push_back(evt);
+                            }
+                        });
+                        let vintr = shell_modes().c_cc[libc::VINTR];
+                        if vintr != 0 && key == Some(Key::from_single_byte(vintr)) {
+                            FLOG!(
+                                reader,
+                                "Received interrupt key, giving up waiting for cursor position"
+                            );
+                            let ok = self.stop_waiting_for_cursor_position();
+                            assert!(ok);
+                        }
+                        continue;
+                    }
+                    extra.map(|extra| self.insert_front(extra));
+                    return Some(key_evt);
                 }
                 ReadbResult::NothingToRead => return None,
             }
@@ -732,24 +778,28 @@ pub trait InputEventQueuer {
             }
             return None;
         };
+        let invalid = Key::from_raw(key::Invalid);
         if buffer.len() == 2 && next == b'\x1b' {
             return Some(
                 match self.parse_escape_sequence(buffer, have_escape_prefix) {
                     Some(mut nested_sequence) => {
+                        if nested_sequence == invalid {
+                            return Some(Key::from_raw(key::Escape));
+                        }
                         nested_sequence.modifiers.alt = true;
                         nested_sequence
                     }
-                    None => Key::from_raw(key::Invalid),
+                    _ => invalid,
                 },
             );
         }
         if next == b'[' {
             // potential CSI
-            return Some(self.parse_csi(buffer).unwrap_or(alt('[')));
+            return Some(self.parse_csi(buffer).unwrap_or(invalid));
         }
         if next == b'O' {
             // potential SS3
-            return Some(self.parse_ss3(buffer).unwrap_or(alt('O')));
+            return Some(self.parse_ss3(buffer).unwrap_or(invalid));
         }
         match canonicalize_control_char(next) {
             Some(mut key) => {
@@ -831,10 +881,12 @@ pub trait InputEventQueuer {
     }
 
     fn parse_csi(&mut self, buffer: &mut Vec<u8>) -> Option<Key> {
-        let mut next_char = |zelf: &mut Self| zelf.try_readb(buffer).unwrap_or(0xff);
         // The maximum number of CSI parameters is defined by NPAR, nominally 16.
         let mut params = [[0_u32; 4]; 16];
-        let mut c = next_char(self);
+        let Some(mut c) = self.try_readb(buffer) else {
+            return Some(ctrl('['));
+        };
+        let mut next_char = |zelf: &mut Self| zelf.try_readb(buffer).unwrap_or(0xff);
         let private_mode;
         if matches!(c, b'?' | b'<' | b'=' | b'>') {
             // private mode
@@ -903,22 +955,49 @@ pub trait InputEventQueuer {
             b'H' => masked_key(key::Home, None), // PC/xterm style
             b'M' | b'm' => {
                 self.disable_mouse_tracking();
+                // Generic X10 or modified VT200 sequence, or extended (SGR/1006) mouse
+                // reporting mode, with semicolon-separated parameters for button code, Px,
+                // and Py, ending with 'M' for button press or 'm' for button release.
                 let sgr = private_mode == Some(b'<');
                 if !sgr && c == b'm' {
                     return None;
                 }
-                // Extended (SGR/1006) mouse reporting mode, with semicolon-separated parameters
-                // for button code, Px, and Py, ending with 'M' for button press or 'm' for
-                // button release.
-                if sgr {
+                let button = if sgr {
+                    params[0][0]
+                } else {
+                    u32::from(next_char(self)) - 32
+                };
+                let x = usize::try_from(
+                    if sgr {
+                        params[1][0]
+                    } else {
+                        u32::from(next_char(self)) - 32
+                    } - 1,
+                )
+                .unwrap();
+                let y = usize::try_from(
+                    if sgr {
+                        params[2][0]
+                    } else {
+                        u32::from(next_char(self)) - 32
+                    } - 1,
+                )
+                .unwrap();
+                let position = ViewportPosition { x, y };
+                let modifiers = parse_mask((button >> 2) & 0x07);
+                let code = button & 0x43;
+                if code != 0 || c != b'M' || modifiers.is_some() {
                     return None;
                 }
-                // Generic X10 or modified VT200 sequence. It doesn't matter which, they're both 6
-                // chars (although in mode 1005, the characters may be unicode and not necessarily
-                // just one byte long) reporting the button that was clicked and its location.
-                let _ = next_char(self);
-                let _ = next_char(self);
-                let _ = next_char(self);
+                if self.is_waiting_for_cursor_position() {
+                    // TODO: re-queue it I guess.
+                    FLOG!(
+                        reader,
+                        "Received mouse left click while still waiting for Cursor Position Report"
+                    );
+                    return None;
+                }
+                self.on_mouse_left_click(position);
                 return None;
             }
             b't' => {
@@ -938,7 +1017,25 @@ pub trait InputEventQueuer {
             }
             b'P' => masked_key(function_key(1), None),
             b'Q' => masked_key(function_key(2), None),
-            b'R' => masked_key(function_key(3), None),
+            b'R' => {
+                let wait_reason = self.cursor_position_wait_reason().as_ref()?;
+                let y = usize::try_from(params[0][0] - 1).unwrap();
+                let x = usize::try_from(params[1][0] - 1).unwrap();
+                FLOG!(reader, "Received cursor position report y:", y, "x:", x);
+                let continuation = match wait_reason {
+                    WaitingForCursorPosition::MouseLeft(click_position) => {
+                        ImplicitEvent::MouseLeftClickContinuation(
+                            ViewportPosition { x, y },
+                            *click_position,
+                        )
+                    }
+                    WaitingForCursorPosition::ScrollbackPush => {
+                        ImplicitEvent::ScrollbackPushContinuation(y)
+                    }
+                };
+                self.push_front(CharEvent::Implicit(continuation));
+                return None;
+            }
             b'S' => masked_key(function_key(4), None),
             b'~' => match params[0][0] {
                 1 => masked_key(key::Home, None), // VT220/tmux style
@@ -980,11 +1077,11 @@ pub trait InputEventQueuer {
                 } // rxvt style
                 200 => {
                     self.paste_start_buffering();
-                    return Some(Key::from_raw(key::Invalid));
+                    return None;
                 }
                 201 => {
                     self.paste_commit();
-                    return Some(Key::from_raw(key::Invalid));
+                    return None;
                 }
                 _ => return None,
             },
@@ -1029,12 +1126,12 @@ pub trait InputEventQueuer {
             }
             b'Z' => shift(key::Tab),
             b'I' => {
-                self.push_front(CharEvent::from_readline(ReadlineCmd::FocusIn));
-                return Some(Key::from_raw(key::Invalid));
+                self.push_front(CharEvent::Implicit(ImplicitEvent::FocusIn));
+                return None;
             }
             b'O' => {
-                self.push_front(CharEvent::from_readline(ReadlineCmd::FocusOut));
-                return Some(Key::from_raw(key::Invalid));
+                self.push_front(CharEvent::Implicit(ImplicitEvent::FocusOut));
+                return None;
             }
             _ => return None,
         };
@@ -1052,18 +1149,17 @@ pub trait InputEventQueuer {
 
         // We shouldn't directly manipulate stdout from here, so we ask the reader to do it.
         // writembs(outputter_t::stdoutput(), "\x1B[?1000l");
-        self.push_front(CharEvent::from_readline(ReadlineCmd::DisableMouseTracking));
+        self.push_front(CharEvent::Implicit(ImplicitEvent::DisableMouseTracking));
     }
 
     fn parse_ss3(&mut self, buffer: &mut Vec<u8>) -> Option<Key> {
         let mut raw_mask = 0;
-        let mut code = b'0';
-        loop {
+        let Some(mut code) = self.try_readb(buffer) else {
+            return Some(alt('O'));
+        };
+        while (b'0'..=b'9').contains(&code) {
             raw_mask = raw_mask * 10 + u32::from(code - b'0');
             code = self.try_readb(buffer).unwrap_or(0xff);
-            if !(b'0'..=b'9').contains(&code) {
-                break;
-            }
         }
         let modifiers = parse_mask(raw_mask.saturating_sub(1));
         #[rustfmt::skip]
@@ -1228,7 +1324,9 @@ pub trait InputEventQueuer {
         // Find the first sequence of non-char events.
         // EOF is considered a char: we don't want to pull EOF in front of real chars.
         let queue = &mut self.get_input_data_mut().queue;
-        let is_char = |evt: &CharEvent| evt.is_char() || evt.is_eof();
+        let is_char = |evt: &CharEvent| {
+            evt.is_char() || matches!(evt, CharEvent::Implicit(ImplicitEvent::Eof))
+        };
         // Find the index of the first non-char event.
         // If there's none, we're done.
         let Some(first): Option<usize> = queue.iter().position(|e| !is_char(e)) else {
@@ -1273,12 +1371,39 @@ pub trait InputEventQueuer {
         }
     }
 
+    fn is_waiting_for_cursor_position(&self) -> bool {
+        false
+    }
+    fn cursor_position_wait_reason(&self) -> &Option<WaitingForCursorPosition> {
+        &None
+    }
+    fn stop_waiting_for_cursor_position(&mut self) -> bool {
+        false
+    }
+    fn on_mouse_left_click(&mut self, _position: ViewportPosition) {}
+
     /// Override point for when we are about to (potentially) block in select(). The default does
     /// nothing.
     fn prepare_to_select(&mut self) {}
 
     /// Called when select() is interrupted by a signal.
     fn select_interrupted(&mut self) {}
+
+    fn enqueue_interrupt_key(&mut self) {
+        let vintr = shell_modes().c_cc[libc::VINTR];
+        if vintr != 0 {
+            let interrupt_evt = CharEvent::from_key(Key::from_single_byte(vintr));
+            if self.stop_waiting_for_cursor_position() {
+                FLOG!(
+                    reader,
+                    "Received interrupt, giving up on waiting for cursor position"
+                );
+                self.push_back(interrupt_evt);
+            } else {
+                self.push_front(interrupt_evt);
+            }
+        }
+    }
 
     /// Override point for when when select() is interrupted by the universal variable notifier.
     /// The default does nothing.
@@ -1323,10 +1448,7 @@ impl InputEventQueuer for InputEventQueue {
 
     fn select_interrupted(&mut self) {
         if reader_test_and_clear_interrupted() != 0 {
-            let vintr = shell_modes().c_cc[libc::VINTR];
-            if vintr != 0 {
-                self.push_front(CharEvent::from_key(Key::from_single_byte(vintr)));
-            }
+            self.enqueue_interrupt_key();
         }
     }
 }
