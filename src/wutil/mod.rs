@@ -595,14 +595,12 @@ pub fn fish_iswalnum(c: char) -> bool {
     !fish_reserved_codepoint(c) && !fish_is_pua(c) && c.is_alphanumeric()
 }
 
-extern "C" {
-    fn iswgraph(wc: libc::wchar_t) -> libc::c_int; // Technically it's wint_t
-}
-
 /// We need this because there are too many implementations that don't return the proper answer for
 /// some code points. See issue #3050.
 pub fn fish_iswgraph(c: char) -> bool {
-    !fish_reserved_codepoint(c) && (fish_is_pua(c) || unsafe { iswgraph(c as libc::wchar_t) } != 0)
+    use unicode_width::UnicodeWidthChar;
+
+    !fish_reserved_codepoint(c) && (fish_is_pua(c) || c.width().is_some())
 }
 
 pub fn fish_wcswidth(s: &wstr) -> isize {

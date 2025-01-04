@@ -35,7 +35,7 @@ static WC_LOOKUP_TABLE: Lazy<WcLookupTable> = Lazy::new(WcLookupTable::new);
 pub fn wcwidth(c: char) -> isize {
     use unicode_width::UnicodeWidthChar;
 
-    c.width().map(|w| w as isize).unwrap_or(1)
+    c.width().map(|w| w as isize).unwrap_or_default()
 }
 
 // Big hack to use our versions of wcswidth where we know them to be broken, which is

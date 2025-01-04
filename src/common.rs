@@ -1134,25 +1134,32 @@ pub fn str2wcstring(inp: &[u8]) -> WString {
             // TODO This check used to be conditionally compiled only on affected platforms.
             true
         } else {
+            let mut codepoint = u32::from(c);
             ret = unsafe {
                 mbrtowc(
-                    std::ptr::addr_of_mut!(c),
+                    std::ptr::addr_of_mut!(codepoint),
                     std::ptr::addr_of!(inp[pos]).cast(),
                     inp.len() - pos,
                     &mut state,
                 )
             };
-            // Determine whether to encode this character with our crazy scheme.
-            fish_reserved_codepoint(c)
-            ||
-            // Incomplete sequence.
-            ret == 0_usize.wrapping_sub(2)
-            ||
-            // Invalid data.
-            ret == 0_usize.wrapping_sub(1)
-            ||
-            // Other error codes? Terrifying, should never happen.
-            ret > inp.len() - pos
+            match char::from_u32(codepoint) {
+                Some(codepoint) => {
+                    c = codepoint;
+                    // Determine whether to encode this character with our crazy scheme.
+                    fish_reserved_codepoint(c)
+                    ||
+                    // Incomplete sequence.
+                    ret == 0_usize.wrapping_sub(2)
+                    ||
+                    // Invalid data.
+                    ret == 0_usize.wrapping_sub(1)
+                    ||
+                    // Other error codes? Terrifying, should never happen.
+                    ret > inp.len() - pos
+                }
+                None => true,
+            }
         };
 
         if use_encode_direct {
@@ -1333,7 +1340,7 @@ pub fn fish_setlocale() {
 fn can_be_encoded(wc: char) -> bool {
     let mut converted = [0 as libc::c_char; AT_LEAST_MB_LEN_MAX];
     let mut state = zero_mbstate();
-    unsafe { wcrtomb(converted.as_mut_ptr(), wc, &mut state) != 0_usize.wrapping_sub(1) }
+    unsafe { wcrtomb(converted.as_mut_ptr(), wc as u32, &mut state) != 0_usize.wrapping_sub(1) }
 }
 
 /// Call read, blocking and repeating on EINTR. Exits on EAGAIN.

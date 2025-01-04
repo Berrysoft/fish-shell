@@ -316,8 +316,13 @@ pub fn wcs2string_callback(input: &wstr, mut func: impl FnMut(&[u8]) -> bool) ->
             }
         } else {
             converted = [0; AT_LEAST_MB_LEN_MAX];
-            let len =
-                unsafe { wcrtomb(std::ptr::addr_of_mut!(converted[0]).cast(), c, &mut state) };
+            let len = unsafe {
+                wcrtomb(
+                    std::ptr::addr_of_mut!(converted[0]).cast(),
+                    c as u32,
+                    &mut state,
+                )
+            };
             if len == 0_usize.wrapping_sub(1) {
                 wcs2string_bad_char(c);
                 state = zero_mbstate();
