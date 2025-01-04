@@ -71,12 +71,6 @@ if(NOT FISH_IN_TREE_BUILD)
                        VERBATIM)
 endif()
 
-# Copy littlecheck.py
-configure_file(build_tools/littlecheck.py littlecheck.py COPYONLY)
-
-# Copy pexpect_helper.py
-configure_file(build_tools/pexpect_helper.py pexpect_helper.py COPYONLY)
-
 # Suppress generating Xcode schemes for all tests, there's too many.
 set(CMAKE_XCODE_GENERATE_SCHEME 0)
 
@@ -95,21 +89,18 @@ add_custom_target(tests_buildroot_target
                   COMMAND ${CMAKE_COMMAND} -E make_directory ${TEST_INSTALL_DIR}
                   COMMAND env DESTDIR=${TEST_INSTALL_DIR} ${CMAKE_COMMAND}
                           --build ${CMAKE_CURRENT_BINARY_DIR} --target install
-                  # Put fish_test_helper there too:
-                  COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_BINARY_DIR}/fish_test_helper
-                          ${TEST_INSTALL_DIR}/${CMAKE_INSTALL_PREFIX}/bin
                   # Also symlink fish to where the tests expect it to be:
                   COMMAND ${CMAKE_COMMAND} -E create_symlink
                           ${TEST_INSTALL_DIR}/${CMAKE_INSTALL_PREFIX}
                           ${TEST_ROOT_DIR}
-                  DEPENDS fish fish_test_helper)
+                  DEPENDS fish)
 
 FILE(GLOB FISH_CHECKS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/checks/*.fish)
 foreach(CHECK ${FISH_CHECKS})
   get_filename_component(CHECK_NAME ${CHECK} NAME)
   get_filename_component(CHECK ${CHECK} NAME_WE)
   add_test(NAME ${CHECK_NAME}
-    COMMAND sh ${CMAKE_CURRENT_BINARY_DIR}/tests/test_driver.sh
+    COMMAND env FISHDIR=${CMAKE_CURRENT_BINARY_DIR}/ ${CMAKE_CURRENT_BINARY_DIR}/tests/test_driver.sh
                ${CMAKE_CURRENT_BINARY_DIR}/tests/test.fish ${CHECK}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/tests
   )
@@ -122,7 +113,7 @@ FILE(GLOB PEXPECTS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/pexpects/*.py)
 foreach(PEXPECT ${PEXPECTS})
   get_filename_component(PEXPECT ${PEXPECT} NAME)
   add_test(NAME ${PEXPECT}
-    COMMAND sh ${CMAKE_CURRENT_BINARY_DIR}/tests/test_driver.sh
+    COMMAND env FISHDIR=${CMAKE_CURRENT_BINARY_DIR}/ ${CMAKE_CURRENT_BINARY_DIR}/tests/test_driver.sh
       ${CMAKE_CURRENT_BINARY_DIR}/tests/interactive.fish ${PEXPECT}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/tests
   )

@@ -44,7 +44,7 @@ use fish::{
     fprintf, function, future_feature_flags as features,
     history::{self, start_private_mode},
     io::IoChain,
-    nix::{getpid, isatty},
+    nix::{getpid, getrusage, isatty, RUsage},
     panic::panic_handler,
     parse_constants::{ParseErrorList, ParseTreeFlags},
     parse_tree::ParsedSource,
@@ -65,7 +65,6 @@ use fish::{
 };
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::File;
-use std::mem::MaybeUninit;
 use std::os::unix::prelude::*;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -237,13 +236,7 @@ fn tv_to_msec(tv: &libc::timeval) -> i64 {
 }
 
 fn print_rusage_self() {
-    let mut rs = MaybeUninit::uninit();
-    if unsafe { libc::getrusage(libc::RUSAGE_SELF, rs.as_mut_ptr()) } != 0 {
-        let s = CString::new("getrusage").unwrap();
-        unsafe { libc::perror(s.as_ptr()) }
-        return;
-    }
-    let rs: libc::rusage = unsafe { rs.assume_init() };
+    let rs = getrusage(RUsage::RSelf);
     let rss_kb = if cfg!(target_os = "macos") {
         // mac use bytes.
         rs.ru_maxrss / 1024
@@ -773,7 +766,7 @@ fn throwing_main() -> i32 {
             .write(true)
             .truncate(true)
             .create(true)
-            .open(debug_path.clone())
+            .open(&debug_path)
         {
             Ok(dbg_file) => {
                 // Rust sets O_CLOEXEC by default
@@ -818,10 +811,9 @@ fn throwing_main() -> i32 {
         save_term_foreground_process_group();
     }
 
-    let mut paths: Option<ConfigPaths> = None;
     // If we're not executing, there's no need to find the config.
-    if !opts.no_exec {
-        paths = Some(determine_config_directory_paths(OsString::from_vec(
+    let paths: Option<ConfigPaths> = if !opts.no_exec {
+        let paths = Some(determine_config_directory_paths(OsString::from_vec(
             wcs2string(&args[0]),
         )));
         env_init(
@@ -829,7 +821,10 @@ fn throwing_main() -> i32 {
             /* do uvars */ !opts.no_config,
             /* default paths */ opts.no_config,
         );
-    }
+        paths
+    } else {
+        None
+    };
 
     // Set features early in case other initialization depends on them.
     // Start with the ones set in the environment, then those set on the command line (so the
@@ -846,7 +841,7 @@ fn throwing_main() -> i32 {
 
     // Construct the root parser!
     let env = Rc::new(EnvStack::globals().create_child(true /* dispatches_var_changes */));
-    let parser: &Parser = &Parser::new(env, CancelBehavior::Clear);
+    let parser = &Parser::new(env, CancelBehavior::Clear);
     parser.set_syncs_uvars(!opts.no_config);
 
     if !opts.no_exec && !opts.no_config {
@@ -1009,7 +1004,6 @@ fn fish_xdm_login_hack_hack_hack_hack(cmds: &mut [OsString], args: &[WString]) -
         return false;
     }
 
-    let mut result = false;
     let cmd = &cmds[0];
     if cmd == "exec \"${@}\"" || cmd == "exec \"$@\"" {
         // We're going to construct a new command that starts with exec, and then has the
@@ -1021,7 +1015,8 @@ fn fish_xdm_login_hack_hack_hack_hack(cmds: &mut [OsString], args: &[WString]) -
         }
 
         cmds[0] = new_cmd;
-        result = true;
+        true
+    } else {
+        false
     }
-    result
 }

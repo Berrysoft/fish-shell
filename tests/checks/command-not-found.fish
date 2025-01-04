@@ -1,4 +1,4 @@
-# RUN: %fish -C 'set -g fish %fish' %s | %filter-control-sequences
+#RUN: fish=%fish %fish %s | %fish %filter-control-sequences
 set -g PATH
 $fish -c "nonexistent-command-1234 banana rama"
 #CHECKERR: fish: Unknown command: nonexistent-command-1234
@@ -35,7 +35,7 @@ echo $status
 set -g PATH .
 echo banana > foobar
 foobar --banana
-# CHECKERR: checks/command-not-found.fish (line {{\d+}}): Unknown command. './foobar' exists but is not an executable file.
+# CHECKERR: {{.*}}checks/command-not-found.fish (line {{\d+}}): Unknown command. './foobar' exists but is not an executable file.
 # CHECKERR: foobar --banana
 # CHECKERR: ^~~~~^
 
