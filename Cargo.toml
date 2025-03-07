@@ -9,8 +9,6 @@ edition = "2021"
 
 [profile.release]
 overflow-checks = true
-codegen-units = 1
-lto = true
 
 [profile.release-with-debug]
 inherits = "release"
@@ -110,3 +108,4 @@ clippy.needless_lifetimes = "allow"
 [patch.crates-io]
 libc = { git = "https://github.com/Berrysoft/libc.git", branch = "dev/cygwin" }
 nix = { git = "https://github.com/Berrysoft/nix.git", rev = "b97de9a4c170d25cbc7019953305ddbc4246d1a5" }
+errno = { git = "https://github.com/Berrysoft/rust-errno.git", branch = "dev/cygwin" }

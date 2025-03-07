@@ -90,8 +90,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 [[package]]
 name = "errno"
 version = "0.3.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33d852cb9b869c2a9b3df2f71a3074817f01e1844f839a144f5fcef059a4eb5d"
+source = "git+https://github.com/Berrysoft/rust-errno.git?branch=dev/cygwin#3f8c474def919f46da32897226a7c9f7610f04e0"
 dependencies = [
  "libc",
  "windows-sys",
