@@ -170,7 +170,7 @@ end
 
 # Decide if git is safe to run.
 # On Darwin, git is pre-installed as a stub, which will pop a dialog if you run it.
-if string match -q Darwin -- (uname) && string match -q /usr/bin/git -- (command -s git) && type -q xcode-select && type -q xcrun
+if string match -q Darwin -- (__fish_uname) && string match -q /usr/bin/git -- (command -s git) && type -q xcode-select && type -q xcrun
     if not xcode-select --print-path &>/dev/null
         # Only the stub git is installed.
         # Do not try to run it.
@@ -180,8 +180,7 @@ if string match -q Darwin -- (uname) && string match -q /usr/bin/git -- (command
     else
         # git is installed, but on the first run it may be very slow as xcrun needs to populate the cache.
         # Kick it off in the background to populate the cache.
-        /bin/sh -c '/usr/bin/git --version; touch /tmp/__fish_git_ready' &>/dev/null &
-        disown $last_pid &>/dev/null
+        /bin/sh -c '( /usr/bin/git --version; touch /tmp/__fish_git_ready ) >/dev/null 2>&1 &'
         function __fish_git_prompt_ready
             path is /tmp/__fish_git_ready || return 1
             # git is ready, erase the function.

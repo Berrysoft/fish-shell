@@ -870,7 +870,7 @@ but if you need multiple or the command doesn't read from standard input, "proce
 
 This creates a temporary file, stores the output of the command in that file and prints the filename, so it is given to the outer command.
 
-Fish has a default limit of 100 MiB on the data it will read in a command sustitution. If that limit is reached the command (all of it, not just the command substitution - the outer command won't be executed at all) fails and ``$status`` is set to 122. This is so command substitutions can't cause the system to go out of memory, because typically your operating system has a much lower limit, so reading more than that would be useless and harmful. This limit can be adjusted with the ``fish_read_limit`` variable (`0` meaning no limit). This limit also affects the :doc:`read <cmds/read>` command.
+Fish has a default limit of 1 GiB on the data it will read in a command substitution. If that limit is reached the command (all of it, not just the command substitution - the outer command won't be executed at all) fails and ``$status`` is set to 122. This is so command substitutions can't cause the system to go out of memory, because typically your operating system has a much lower limit, so reading more than that would be useless and harmful. This limit can be adjusted with the ``fish_read_limit`` variable (`0` meaning no limit). This limit also affects the :doc:`read <cmds/read>` command.
 
 .. [#] One exception: Setting ``$IFS`` to empty will disable line splitting. This is deprecated, use :doc:`string split <cmds/string-split>` instead.
 
@@ -1845,7 +1845,7 @@ The "locale" of a program is its set of language and regional settings that depe
 
 .. envvar:: LC_MONETARY
 
-   Determines currency, how it is formated, and the symbols used.
+   Determines currency, how it is formatted, and the symbols used.
 
 .. envvar:: LC_NUMERIC
 
@@ -2022,17 +2022,17 @@ You can see the current list of features via ``status features``::
     qmark-noglob            on  3.0 ? no longer globs
     regex-easyesc           on  3.1 string replace -r needs fewer \\'s
     ampersand-nobg-in-token on  3.4 & only backgrounds if followed by a separating character
-    remove-percent-self     off 3.8 %self is no longer expanded (use $fish_pid)
-    test-require-arg        off 3.8 builtin test requires an argument
+    remove-percent-self     off 4.0 %self is no longer expanded (use $fish_pid)
+    test-require-arg        off 4.0 builtin test requires an argument
 
 Here is what they mean:
 
-- ``stderr-nocaret`` was introduced in fish 3.0 (and made the default in 3.3). It makes ``^`` an ordinary character instead of denoting an stderr redirection, to make dealing with quoting and such easier. Use ``2>`` instead. This can no longer be turned off since fish 3.5. The flag can still be tested for compatibility, but a ``no-stderr-nocaret`` value will simply be ignored.
-- ``qmark-noglob`` was also introduced in fish 3.0 (and made the default in 3.8). It makes ``?`` an ordinary character instead of a single-character glob. Use a ``*`` instead (which will match multiple characters) or find other ways to match files like ``find``.
-- ``regex-easyesc`` was introduced in 3.1. It makes it so the replacement expression in ``string replace -r`` does one fewer round of escaping. Before, to escape a backslash you would have to use ``string replace -ra '([ab])' '\\\\\\\\$1'``. After, just ``'\\\\$1'`` is enough. Check your ``string replace`` calls if you use this anywhere.
-- ``ampersand-nobg-in-token`` was introduced in fish 3.4. It makes it so a ``&`` i no longer interpreted as the backgrounding operator in the middle of a token, so dealing with URLs becomes easier. Either put spaces or a semicolon after the ``&``. This is recommended formatting anyway, and ``fish_indent`` will have done it for you already.
-- ``remove-percent-self`` turns off the special ``%self`` expansion. It was introduced in 3.8. To get fish's pid, you can use the :envvar:`fish_pid` variable.
-- ``test-require-arg`` removes :doc:`builtin test <cmds/test>`'s one-argument form (``test "string"``. It was introduced in 3.8. To test if a string is non-empty, use ``test -n "string"``. If disabled, any call to ``test`` that would change sends a :ref:`debug message <debugging-fish>` of category "deprecated-test", so starting fish with ``fish --debug=deprecated-test`` can be used to find offending calls.
+- ``stderr-nocaret`` was introduced in fish 3.0 and cannot be turned off since fish 3.5. It can still be tested for compatibility, but a ``no-stderr-nocaret`` value will simply be ignored. The flag made ``^`` an ordinary character instead of denoting an stderr redirection. Use ``2>`` instead.
+- ``qmark-noglob`` was also introduced in fish 3.0 (and made the default in 4.0). It makes ``?`` an ordinary character instead of a single-character glob. Use a ``*`` instead (which will match multiple characters) or find other ways to match files like ``find``.
+- ``regex-easyesc`` was introduced in 3.1 (and made the default in 3.5). It makes it so the replacement expression in ``string replace -r`` does one fewer round of escaping. Before, to escape a backslash you would have to use ``string replace -ra '([ab])' '\\\\\\\\$1'``. After, just ``'\\\\$1'`` is enough. Check your ``string replace`` calls if you use this anywhere.
+- ``ampersand-nobg-in-token`` was introduced in fish 3.4 (and made the default in 3.5). It makes it so a ``&`` i no longer interpreted as the backgrounding operator in the middle of a token, so dealing with URLs becomes easier. Either put spaces or a semicolon after the ``&``. This is recommended formatting anyway, and ``fish_indent`` will have done it for you already.
+- ``remove-percent-self`` turns off the special ``%self`` expansion. It was introduced in 4.0. To get fish's pid, you can use the :envvar:`fish_pid` variable.
+- ``test-require-arg`` removes :doc:`builtin test <cmds/test>`'s one-argument form (``test "string"``. It was introduced in 4.0. To test if a string is non-empty, use ``test -n "string"``. If disabled, any call to ``test`` that would change sends a :ref:`debug message <debugging-fish>` of category "deprecated-test", so starting fish with ``fish --debug=deprecated-test`` can be used to find offending calls.
 
 
 These changes are introduced off by default. They can be enabled on a per session basis::
@@ -2052,12 +2052,6 @@ You can also use the version as a group, so ``3.0`` is equivalent to "stderr-noc
 Prefixing a feature with ``no-`` turns it off instead. E.g. to reenable the ``?`` single-character glob::
 
   set -Ua fish_features no-qmark-noglob
-
-Currently, the following features are enabled by default:
-
-- stderr-nocaret - ``^`` no longer redirects stderr, use ``2>``. Enabled by default in fish 3.3.0. No longer changeable since fish 3.5.0.
-- regex-easyesc - ``string replace -r`` requires fewer backslashes in the replacement part. Enabled by default in fish 3.5.0.
-- ampersand-nobg-in-token - ``&`` in the middle of a word is a normal character instead of backgrounding. Enabled by default in fish 3.5.0.
 
 .. _event:
 
@@ -2127,6 +2121,8 @@ Fish includes basic built-in debugging facilities that allow you to stop executi
 To start a debug session simply insert the :doc:`builtin command <cmds/breakpoint>` ``breakpoint`` at the point in a function or script where you wish to gain control, then run the function or script. Also, the default action of the ``TRAP`` signal is to call this builtin, meaning a running script can be actively debugged by sending it the ``TRAP`` signal (``kill -s TRAP <PID>``). There is limited support for interactively setting or modifying breakpoints from this debug prompt: it is possible to insert new breakpoints in (or remove old ones from) other functions by using the ``funced`` function to edit the definition of a function, but it is not possible to add or remove a breakpoint from the function/script currently loaded and being executed.
 
 Another way to debug script issues is to set the :envvar:`fish_trace` variable, e.g. ``fish_trace=1 fish_prompt`` to see which commands fish executes when running the :doc:`fish_prompt <cmds/fish_prompt>` function.
+
+.. _profiling:
 
 Profiling fish scripts
 ^^^^^^^^^^^^^^^^^^^^^^

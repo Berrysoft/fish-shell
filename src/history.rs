@@ -91,6 +91,8 @@ pub enum SearchType {
     Contains,
     /// Search for commands starting with the given string.
     Prefix,
+    /// Search for commands where any line matches the given string.
+    LinePrefix,
     /// Search for commands containing the given glob pattern.
     ContainsGlob,
     /// Search for commands starting with the given glob pattern.
@@ -291,6 +293,10 @@ impl HistoryItem {
                 find_subslice(term.as_slice(), content_to_match.as_slice()).is_some()
             }
             SearchType::Prefix => content_to_match.as_slice().starts_with(term.as_slice()),
+            SearchType::LinePrefix => content_to_match
+                .as_char_slice()
+                .split(|&c| c == '\n')
+                .any(|line| line.starts_with(term.as_char_slice())),
             SearchType::ContainsGlob => {
                 let mut pat = parse_util_unescape_wildcards(term);
                 if !pat.starts_with(ANY_STRING) {
@@ -380,7 +386,7 @@ struct HistoryImpl {
     /// The file ID of the history file.
     history_file_id: FileId, // INVALID_FILE_ID
     /// The boundary timestamp distinguishes old items from new items. Items whose timestamps are <=
-    /// the boundary are considered "old". Items whose timestemps are > the boundary are new, and are
+    /// the boundary are considered "old". Items whose timestamps are > the boundary are new, and are
     /// ignored by this instance (unless they came from this instance). The timestamp may be adjusted
     /// by incorporate_external_changes().
     boundary_timestamp: SystemTime,
@@ -1080,7 +1086,6 @@ impl HistoryImpl {
     fn enable_automatic_saving(&mut self) {
         assert!(self.disable_automatic_save_counter > 0); // negative overflow!
         self.disable_automatic_save_counter -= 1;
-        self.save_unless_disabled();
     }
 
     /// Irreversibly clears history.
@@ -1614,7 +1619,7 @@ impl History {
         let when = imp.timestamp_now();
         let identifier = imp.next_identifier();
         let item = HistoryItem::new(s.to_owned(), when, identifier, persist_mode);
-        let do_save = persist_mode != PersistenceMode::Ephemeral;
+        let to_disk = persist_mode == PersistenceMode::Disk;
 
         if wants_file_detection {
             imp.disable_automatic_saving();
@@ -1622,7 +1627,7 @@ impl History {
             // Add the item. Then check for which paths are valid on a background thread,
             // and unblock the item.
             // Don't hold the lock while we perform this file detection.
-            imp.add(item, /*pending=*/ true, /*do_save=*/ true);
+            imp.add(item, /*pending=*/ true, to_disk);
             drop(imp);
             let vars_snapshot = vars.snapshot();
             iothread_perform(move || {
@@ -1630,16 +1635,17 @@ impl History {
                 let validated_paths = expand_and_detect_paths(potential_paths, &vars_snapshot);
                 let mut imp = self.imp();
                 imp.set_valid_file_paths(validated_paths, identifier);
-                if do_save {
-                    imp.enable_automatic_saving();
+                imp.enable_automatic_saving();
+                if to_disk {
+                    imp.save_unless_disabled();
                 }
             });
         } else {
             // Add the item.
             // If we think we're about to exit, save immediately, regardless of any disabling. This may
             // cause us to lose file hinting for some commands, but it beats losing history items.
-            imp.add(item, /*pending=*/ true, do_save);
-            if do_save && needs_sync_write {
+            imp.add(item, /*pending=*/ true, to_disk);
+            if to_disk && needs_sync_write {
                 imp.save(false);
             }
         }
@@ -1899,6 +1905,11 @@ impl HistorySearch {
 
             // We're done if it's empty or we cancelled.
             let Some(item) = self.history.item_at_index(index) else {
+                self.current_index = match direction {
+                    SearchDirection::Backward => self.history.size() + 1,
+                    SearchDirection::Forward => 0,
+                };
+                self.current_item = None;
                 return false;
             };
 
@@ -1917,6 +1928,12 @@ impl HistorySearch {
             self.current_index = index;
             return true;
         }
+    }
+
+    /// Move current index so there is `value` matches in between new and old indexes
+    pub fn search_forward(&mut self, value: usize) {
+        while self.go_to_next_match(SearchDirection::Forward) && self.deduper.len() <= value {}
+        self.deduper.clear();
     }
 
     /// Returns the current search result item.

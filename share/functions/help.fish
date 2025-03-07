@@ -129,6 +129,8 @@ function help --description 'Show help for the fish shell'
 
     set -l fish_help_page
     switch "$fish_help_item"
+        case "!"
+            set fish_help_page "cmds/not.html"
         case "."
             set fish_help_page "cmds/source.html"
         case ":"
@@ -187,7 +189,7 @@ function help --description 'Show help for the fish shell'
     and set -l chromeos_linux_garcon
 
     # Generate the online URL, with one dot in the version string (major.minor)
-    set -l version_string (string split . -f 1,2 -- $version | string join .)
+    set -l version_string (string match -rg '(\d+\.\d+(?:b\d+)?).*' -- $version)
     set -l ext_url https://fishshell.com/docs/$version_string/$fish_help_page
     set -l page_url
     if set -q __fish_help_dir[1]; and test -f $__fish_help_dir/index.html; and not set -lq chromeos_linux_garcon
@@ -248,8 +250,7 @@ function help --description 'Show help for the fish shell'
         # The space before the /c is to prevent msys2 from expanding it to a path
         $fish_browser " /c" start $page_url
     else if contains -- $fish_browser[1] $graphical_browsers
-        $fish_browser $page_url &
-        disown $last_pid >/dev/null 2>&1
+        /bin/sh -c '( "$@" ) &' -- $fish_browser $page_url
     else
         $fish_browser $page_url
     end

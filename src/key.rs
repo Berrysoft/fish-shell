@@ -19,16 +19,18 @@ pub(crate) const Left: char = '\u{F506}';
 pub(crate) const Right: char = '\u{F507}';
 pub(crate) const PageUp: char = '\u{F508}';
 pub(crate) const PageDown: char = '\u{F509}';
-pub(crate) const Home: char = '\u{F50a}';
-pub(crate) const End: char = '\u{F50b}';
-pub(crate) const Insert: char = '\u{F50c}';
-pub(crate) const Tab: char = '\u{F50d}';
-pub(crate) const Space: char = '\u{F50e}';
-pub(crate) const Invalid: char = '\u{F50f}';
+pub(crate) const Home: char = '\u{F50A}';
+pub(crate) const End: char = '\u{F50B}';
+pub(crate) const Insert: char = '\u{F50C}';
+pub(crate) const Tab: char = '\u{F50D}';
+pub(crate) const Space: char = '\u{F50E}';
+pub(crate) const Menu: char = '\u{F50F}';
+pub(crate) const PrintScreen: char = '\u{F510}';
 pub(crate) fn function_key(n: u32) -> char {
     assert!((1..=12).contains(&n));
-    char::from_u32(u32::from(Invalid) + n).unwrap()
+    char::from_u32(u32::from('\u{F5FF}') - 12 + (n - 1)).unwrap()
 }
+pub(crate) const Invalid: char = '\u{F5FF}';
 
 const KEY_NAMES: &[(char, &wstr)] = &[
     ('-', L!("minus")),
@@ -48,6 +50,8 @@ const KEY_NAMES: &[(char, &wstr)] = &[
     (Insert, L!("insert")),
     (Tab, L!("tab")),
     (Space, L!("space")),
+    (Menu, L!("menu")),
+    (PrintScreen, L!("printscreen")),
 ];
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -55,6 +59,7 @@ pub struct Modifiers {
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
+    pub sup: bool,
 }
 
 impl Modifiers {
@@ -63,6 +68,7 @@ impl Modifiers {
             ctrl: false,
             alt: false,
             shift: false,
+            sup: false,
         }
     }
     pub(crate) const ALT: Self = {
@@ -280,6 +286,7 @@ pub(crate) fn parse_keys(value: &wstr) -> Result<Vec<Key>, WString> {
                     _ if modifier == "ctrl" => modifiers.ctrl = true,
                     _ if modifier == "alt" => modifiers.alt = true,
                     _ if modifier == "shift" => modifiers.shift = true,
+                    _ if modifier == "super" => modifiers.sup = true,
                     _ => {
                         return Err(wgettext_fmt!(
                             "unknown modifier '%s' in '%s'",
@@ -416,6 +423,9 @@ impl From<Key> for WString {
         if key.modifiers.ctrl {
             res.insert_utfstr(0, L!("ctrl-"));
         }
+        if key.modifiers.sup {
+            res.insert_utfstr(0, L!("super-"));
+        }
 
         res
     }
@@ -468,7 +478,7 @@ pub fn char_to_symbol(c: char) -> WString {
     } else if fish_wcwidth(c) > 0 {
         sprintf!(=> buf, "%lc", c);
     } else if c <= '\u{FFFF}' {
-        // BMP Unicode chararacter
+        // BMP Unicode character
         sprintf!(=> buf, "\\u%04X", u32::from(c));
     } else {
         sprintf!(=> buf, "\\U%06X", u32::from(c));

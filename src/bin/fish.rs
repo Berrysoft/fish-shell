@@ -27,6 +27,8 @@ use fish::common::wcs2osstring;
 use fish::future::IsSomeAnd;
 use fish::{
     ast::Ast,
+    builtins::fish_indent,
+    builtins::fish_key_reader,
     builtins::shared::{
         BUILTIN_ERR_MISSING, BUILTIN_ERR_UNKNOWN, STATUS_CMD_OK, STATUS_CMD_UNKNOWN,
     },
@@ -135,50 +137,38 @@ fn install(confirm: bool, dir: PathBuf) -> bool {
         }
     }
 
-    // TODO: These are duplicated, no idea how to extract
-    //       them into a function
-    for file in Asset::iter() {
-        let path = dir.join(file.as_ref());
-        let Ok(_) = fs::create_dir_all(path.parent().unwrap()) else {
-            eprintln!(
-                "Creating directory '{}' failed",
-                path.parent().unwrap().display()
-            );
-            return false;
-        };
-        let res = File::create(&path);
-        let Ok(mut f) = res else {
-            eprintln!("Creating file '{}' failed", path.display());
-            continue;
-        };
-        // This should be impossible.
-        let d = Asset::get(&file).expect("File was somehow not included???");
-        if let Err(error) = f.write_all(&d.data) {
-            eprintln!("error: {error}");
-            return false;
+    // This function can't be top-level because rust_embed is an optional dependency, so it can't
+    // be a part of the function signature.
+    fn extract_embed<T: rust_embed::Embed>(dir: &Path) -> bool {
+        for file in T::iter() {
+            let path = dir.join(file.as_ref());
+            let Ok(_) = fs::create_dir_all(path.parent().unwrap()) else {
+                eprintln!(
+                    "Creating directory '{}' failed",
+                    path.parent().unwrap().display()
+                );
+                return false;
+            };
+            let res = File::create(&path);
+            let Ok(mut f) = res else {
+                eprintln!("Creating file '{}' failed", path.display());
+                continue;
+            };
+            // This should be impossible.
+            let d = T::get(&file).expect("File was somehow not included???");
+            if let Err(error) = f.write_all(&d.data) {
+                eprintln!("error: {error}");
+                return false;
+            }
         }
+        return true;
     }
 
-    for file in Docs::iter() {
-        let path = dir.join(file.as_ref());
-        let Ok(_) = fs::create_dir_all(path.parent().unwrap()) else {
-            eprintln!(
-                "Creating directory '{}' failed",
-                path.parent().unwrap().display()
-            );
-            return false;
-        };
-        let res = File::create(&path);
-        let Ok(mut f) = res else {
-            eprintln!("Creating file '{}' failed", path.display());
-            continue;
-        };
-        // This should be impossible.
-        let d = Docs::get(&file).expect("File was somehow not included???");
-        if let Err(error) = f.write_all(&d.data) {
-            eprintln!("error: {error}");
-            return false;
-        }
+    if !extract_embed::<Asset>(&dir) {
+        return false;
+    }
+    if !extract_embed::<Docs>(&dir) {
+        return false;
     }
 
     let verfile = dir.join("fish-install-version");
@@ -526,7 +516,7 @@ fn fish_parse_opt(args: &mut [WString], opts: &mut FishCmdOpts) -> ControlFlow<i
     const PRINT_DEBUG_CATEGORIES_ARG: char = 2 as char;
     const PROFILE_STARTUP_ARG: char = 3 as char;
 
-    const SHORT_OPTS: &wstr = L!("+hPilNnvc:C:p:d:f:D:o:");
+    const SHORT_OPTS: &wstr = L!("+:hPilNnvc:C:p:d:f:D:o:");
     const LONG_OPTS: &[WOption<'static>] = &[
         wopt(L!("command"), RequiredArgument, 'c'),
         wopt(L!("init-command"), RequiredArgument, 'C'),
@@ -709,6 +699,15 @@ fn fish_parse_opt(args: &mut [WString], opts: &mut FishCmdOpts) -> ControlFlow<i
 }
 
 fn main() {
+    // If we are called as "/path/to/fish_key_reader", become fish_key_reader.
+    if let Some(name) = env::args_os().next() {
+        let p = Path::new(&name).file_name().and_then(|x| x.to_str());
+        if p == Some("fish_key_reader") {
+            return fish_key_reader::main();
+        } else if p == Some("fish_indent") {
+            return fish_indent::main();
+        }
+    }
     PROGRAM_NAME.set(L!("fish")).unwrap();
     if !cfg!(small_main_stack) {
         panic_handler(throwing_main);

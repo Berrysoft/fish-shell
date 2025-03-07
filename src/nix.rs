@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use crate::wutil::perror;
+use libc::mode_t;
 
 #[allow(clippy::unnecessary_cast)]
 pub const fn timeval_to_duration(val: &libc::timeval) -> Duration {
@@ -30,6 +31,9 @@ pub fn geteuid() -> u32 {
 }
 pub fn getegid() -> u32 {
     unsafe { libc::getegid() }
+}
+pub fn getpgrp() -> i32 {
+    unsafe { libc::getpgrp() }
 }
 pub fn getpid() -> i32 {
     unsafe { libc::getpid() }
@@ -71,4 +75,8 @@ pub fn getrusage(resource: RUsage) -> libc::rusage {
             unsafe { std::mem::zeroed() }
         }
     }
+}
+
+pub fn umask(mask: mode_t) -> mode_t {
+    unsafe { libc::umask(mask) }
 }

@@ -99,9 +99,8 @@ end" >$__fish_config_dir/config.fish
             set -l update_args -B $__fish_data_dir/tools/create_manpage_completions.py --manpath --cleanup-in $__fish_user_data_dir/generated_completions --cleanup-in $__fish_cache_dir/generated_completions
             if set -l python (__fish_anypython)
                 # Run python directly in the background and swallow all output
-                $python $update_args >/dev/null 2>&1 &
-                # Then disown the job so that it continues to run in case of an early exit (#6269)
-                disown >/dev/null 2>&1
+                # Orphan the job so that it continues to run in case of an early exit (#6269)
+                /bin/sh -c '( "$@" ) >/dev/null 2>&1 &' -- $python $update_args
             end
         end
     end
@@ -131,7 +130,7 @@ end" >$__fish_config_dir/config.fish
     #
     # Only a few builtins take filenames; initialize the rest with no file completions
     #
-    complete -c(builtin -n | string match -rv '(\.|:|source|cd|contains|count|echo|exec|printf|random|realpath|set|\\[|test|for)') --no-files
+    complete -c(builtin -n | string match -rv '(\.|:|source|cd|contains|count|echo|exec|fish_indent|printf|random|realpath|set|\\[|test|for)') --no-files
 
     # Reload key bindings when binding variable change
     function __fish_reload_key_bindings -d "Reload key bindings when binding variable change" --on-variable fish_key_bindings
@@ -213,7 +212,11 @@ end" >$__fish_config_dir/config.fish
 
     # Notify terminals when $PWD changes via OSC 7 (issue #906).
     function __fish_update_cwd_osc --on-variable PWD --description 'Notify terminals when $PWD changes'
-        printf \e\]7\;file://%s%s\a $hostname (string escape --style=url -- $PWD)
+        set -l host $hostname
+        if set -q KONSOLE_VERSION
+            set host ''
+        end
+        printf \e\]7\;file://%s%s\a $host (string escape --style=url -- $PWD)
     end
     __fish_update_cwd_osc # Run once because we might have already inherited a PWD from an old tab
 

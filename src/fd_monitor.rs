@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::common::exit_without_destructors;
-use crate::fd_readable_set::FdReadableSet;
+use crate::fd_readable_set::{FdReadableSet, Timeout};
 use crate::fds::AutoCloseFd;
 use crate::flog::FLOG;
 use crate::threads::assert_is_background_thread;
@@ -136,7 +136,11 @@ impl FdEventSignaller {
     /// but guarantees that the next call to wait() will not block.
     /// Return true if readable, false if not readable, or not interrupted by a signal.
     pub fn poll(&self, wait: bool /* = false */) -> bool {
-        let timeout = if wait { FdReadableSet::kNoTimeout } else { 0 };
+        let timeout = if wait {
+            Timeout::Forever
+        } else {
+            Timeout::ZERO
+        };
         FdReadableSet::is_fd_readable(self.read_fd(), timeout)
     }
 
@@ -380,12 +384,11 @@ impl BackgroundFdMonitor {
             // in particular it may even close file descriptors that we are waiting on. That is why
             // we handle EBADF. Note that even if the file descriptor is recycled, we don't invoke
             // a callback for it unless its ItemID is still present.
+            //
+            // Note that WSLv1 doesn't throw EBADF if the fd is closed is mid-select.
             drop(data);
-            let ret = fds.check_readable(
-                timeout
-                    .map(|duration| duration.as_micros() as u64)
-                    .unwrap_or(FdReadableSet::kNoTimeout),
-            );
+            let ret =
+                fds.check_readable(timeout.map(Timeout::Duration).unwrap_or(Timeout::Forever));
             if ret < 0 && !matches!(errno().0, libc::EINTR | libc::EBADF | 0) {
                 // Surprising error
                 perror("select");

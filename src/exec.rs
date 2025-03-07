@@ -604,7 +604,7 @@ fn run_internal_process(p: &Process, outdata: Vec<u8>, errdata: Vec<u8>, ios: &I
         let mut status = f.success_status.clone();
         if !f.skip_out() {
             if let Err(err) = write_loop(&f.src_outfd, &f.outdata) {
-                if err.raw_os_error().unwrap() != EPIPE {
+                if err.raw_os_error() != Some(EPIPE) {
                     perror("write");
                 }
                 if status.is_success() {
@@ -614,7 +614,7 @@ fn run_internal_process(p: &Process, outdata: Vec<u8>, errdata: Vec<u8>, ios: &I
         }
         if !f.skip_err() {
             if let Err(err) = write_loop(&f.src_errfd, &f.errdata) {
-                if err.raw_os_error().unwrap() != EPIPE {
+                if err.raw_os_error() != Some(EPIPE) {
                     perror("write");
                 }
                 if status.is_success() {
@@ -675,7 +675,7 @@ fn fork_child_for_process(
     // Claim the tty from fish, if the job wants it and we are the pgroup leader.
     let claim_tty_from = if p.leads_pgrp && job.group().wants_terminal() {
         // getpgrp(2) cannot fail and always returns the (positive) caller's pgid
-        Some(NonZeroU32::new(unsafe { libc::getpgrp() } as u32).unwrap())
+        Some(NonZeroU32::new(crate::nix::getpgrp() as u32).unwrap())
     } else {
         None
     };
@@ -702,11 +702,7 @@ fn fork_child_for_process(
 
     // Record the pgroup if this is the leader.
     // Both parent and child attempt to send the process to its new group, to resolve the race.
-    let pid = if is_parent {
-        pid
-    } else {
-        unsafe { libc::getpid() }
-    };
+    let pid = if is_parent { pid } else { crate::nix::getpid() };
     p.set_pid(pid);
     if p.leads_pgrp {
         job.group().set_pgid(pid);
@@ -1106,7 +1102,6 @@ fn get_performer_for_builtin(p: &Process, j: &Job, io_chain: &IoChain) -> Box<Pr
 
     // Pull out some fields which we want to copy. We don't want to store the process or job in the
     // returned closure.
-    let argv = p.argv().clone();
     let job_group = j.group.clone();
     let io_chain = io_chain.clone();
 
@@ -1114,7 +1109,7 @@ fn get_performer_for_builtin(p: &Process, j: &Job, io_chain: &IoChain) -> Box<Pr
     // thread.
     Box::new(
         move |parser: &Parser,
-              _p: &Process,
+              p: &Process,
               output_stream: Option<&mut OutputStream>,
               errput_stream: Option<&mut OutputStream>| {
             let output_stream = output_stream.unwrap();
@@ -1151,8 +1146,11 @@ fn get_performer_for_builtin(p: &Process, j: &Job, io_chain: &IoChain) -> Box<Pr
                 .unwrap_or(false);
 
             // Execute the builtin.
-            let mut shim_argv: Vec<&wstr> =
-                argv.iter().map(|s| truncate_at_nul(s.as_ref())).collect();
+            let mut shim_argv: Vec<&wstr> = p
+                .argv()
+                .iter()
+                .map(|s| truncate_at_nul(s.as_ref()))
+                .collect();
             builtin_run(parser, &mut shim_argv, &mut streams)
         },
     )
@@ -1351,7 +1349,7 @@ fn get_deferred_process(j: &Job) -> Option<usize> {
         return None;
     }
 
-    // Find the last non-external process, and return it if it pipes into an extenal process.
+    // Find the last non-external process, and return it if it pipes into an external process.
     for (i, p) in j.processes().iter().enumerate().rev() {
         if p.typ != ProcessType::external {
             return if p.is_last_in_job { None } else { Some(i) };

@@ -45,8 +45,9 @@ The following options change the way ``commandline`` updates the command line bu
 **-a** or **--append**
     Do not remove the current commandline, append the specified string at the end of it.
 
-**-i** or **--insert**
-    Do not remove the current commandline, insert the specified string at the current cursor position
+**-i**, **--insert** or **--insert-smart**
+    Do not remove the current commandline, insert the specified string at the current cursor position.
+    The **--insert-smart** option turns on a Do-What-I-Mean (DWIM) mode: it strips any **$** prefix from the first command on each line.
 
 **-r** or **--replace**
     Remove the current commandline and replace it with the specified string (default)
@@ -71,7 +72,7 @@ The following options change what part of the commandline is printed or updated:
     Selects the current token
 
 **--search-field**
-    Use the pager search field instead of the command line. Returns false is the search field is not shown.
+    Use the pager search field instead of the command line. Returns false if the search field is not shown.
 
 The following options change the way ``commandline`` prints the current commandline buffer:
 
@@ -116,7 +117,7 @@ The following options output metadata about the commandline state:
 **--is-valid**
     Returns true when the commandline is syntactically valid and complete.
     If it is, it would be executed when the ``execute`` bind function is called.
-    If the commandline is incomplete, return 2, if erroneus, return 1.
+    If the commandline is incomplete, return 2, if erroneous, return 1.
 
 **--showing-suggestion**
     Evaluates to true (i.e. returns 0) when the shell is currently showing an automatic history completion/suggestion, available to be consumed via one of the `forward-` bindings.

@@ -8,6 +8,7 @@
 //! of text around to handle text insertion.
 
 use crate::editable_line::line_at_cursor;
+use crate::input_common::{CURSOR_UP_SUPPORTED, SCROLL_FORWARD_SUPPORTED};
 use crate::key::ViewportPosition;
 use crate::pager::{PageRendering, Pager, PAGER_MIN_HEIGHT};
 use crate::FLOG;
@@ -27,27 +28,35 @@ use crate::common::{
     has_working_tty_timestamps, shell_modes, str2wcstring, wcs2string, write_loop, ScopeGuard,
     ScopeGuarding,
 };
-use crate::curses::{term, tparm0, tparm1};
 use crate::env::{Environment, TERM_HAS_XN};
 use crate::fallback::fish_wcwidth;
 use crate::flog::FLOGF;
 #[allow(unused_imports)]
 use crate::future::IsSomeAnd;
 use crate::global_safety::RelaxedAtomicBool;
-use crate::highlight::HighlightColorResolver;
-use crate::highlight::HighlightSpec;
+use crate::highlight::{HighlightColorResolver, HighlightSpec};
 use crate::output::Outputter;
+use crate::terminal::{term, tparm1};
 use crate::termsize::{termsize_last, Termsize};
 use crate::wchar::prelude::*;
 use crate::wcstringutil::string_prefixes_string;
 use crate::wutil::fstat;
+
+#[derive(Copy, Clone, Default)]
+pub enum CharOffset {
+    #[default]
+    None,
+    Cmd(usize),
+    Pointer(usize),
+    Pager(usize),
+}
 
 #[derive(Clone, Default)]
 pub struct HighlightedChar {
     highlight: HighlightSpec,
     character: char,
     // Logical offset within the command line.
-    offset_in_cmdline: usize,
+    offset_in_cmdline: CharOffset,
 }
 
 /// A class representing a single line of a screen.
@@ -70,7 +79,12 @@ impl Line {
     }
 
     /// Append a single character `txt` to the line with color `c`.
-    pub fn append(&mut self, character: char, highlight: HighlightSpec, offset_in_cmdline: usize) {
+    pub fn append(
+        &mut self,
+        character: char,
+        highlight: HighlightSpec,
+        offset_in_cmdline: CharOffset,
+    ) {
         self.text.push(HighlightedChar {
             highlight,
             character: rendered_character(character),
@@ -79,7 +93,12 @@ impl Line {
     }
 
     /// Append a nul-terminated string `txt` to the line, giving each character `color`.
-    pub fn append_str(&mut self, txt: &wstr, highlight: HighlightSpec, offset_in_cmdline: usize) {
+    pub fn append_str(
+        &mut self,
+        txt: &wstr,
+        highlight: HighlightSpec,
+        offset_in_cmdline: CharOffset,
+    ) {
         for c in txt.chars() {
             self.append(c, highlight, offset_in_cmdline);
         }
@@ -101,7 +120,7 @@ impl Line {
     }
 
     /// Return the logical offset corresponding to this cell
-    pub fn offset_in_cmdline_at(&self, idx: usize) -> usize {
+    pub fn offset_in_cmdline_at(&self, idx: usize) -> CharOffset {
         self.text[idx].offset_in_cmdline
     }
 
@@ -199,7 +218,7 @@ pub struct Screen {
     /// The internal representation of the actual screen contents.
     actual: ScreenData,
     /// A string containing the prompt which was last printed to the screen.
-    actual_left_prompt: WString,
+    actual_left_prompt: Option<WString>,
     /// Last right prompt width.
     last_right_prompt_width: usize,
     /// If we support soft wrapping, we can output to this location without any cursor motion.
@@ -217,8 +236,7 @@ pub struct Screen {
     actual_lines_before_reset: usize,
     /// Modification times to check if any output has occurred other than from fish's
     /// main loop, in which case we need to redraw.
-    mtime_stdout: Option<SystemTime>,
-    mtime_stderr: Option<SystemTime>,
+    mtime_stdout_stderr: (Option<SystemTime>, Option<SystemTime>),
 }
 
 impl Screen {
@@ -235,9 +253,13 @@ impl Screen {
             need_clear_lines: Default::default(),
             need_clear_screen: Default::default(),
             actual_lines_before_reset: Default::default(),
-            mtime_stdout: Default::default(),
-            mtime_stderr: Default::default(),
+            mtime_stdout_stderr: Default::default(),
         }
+    }
+
+    /// Return whether the last rendering was so large we could only display part of the command line.
+    pub fn scrolled(&self) -> bool {
+        self.scrolled
     }
 
     /// This is the main function for the screen output library. It is used to define the desired
@@ -335,9 +357,14 @@ impl Screen {
         self.desired.cursor.y = 0;
 
         // Append spaces for the left prompt.
+        let prompt_offset = if pager.search_field_shown {
+            CharOffset::None
+        } else {
+            CharOffset::Pointer(0)
+        };
         for _ in 0..layout.left_prompt_space {
             let _ = self.desired_append_char(
-                /*offset_in_cmdline=*/ 0,
+                prompt_offset,
                 usize::MAX,
                 ' ',
                 HighlightSpec::new(),
@@ -347,8 +374,12 @@ impl Screen {
             );
         }
 
-        // If overflowing, give the prompt its own line to improve the situation.
-        let first_line_prompt_space = layout.left_prompt_space;
+        // If the prompt doesn't occupy the full line, justify the command line to the end of the prompt.
+        let first_line_prompt_space = if layout.left_prompt_space == screen_width {
+            0
+        } else {
+            layout.left_prompt_space
+        };
 
         // Reconstruct the command line.
         let effective_commandline = explicit_before_suggestion.to_owned()
@@ -383,11 +414,14 @@ impl Screen {
                 break scrolled_cursor.unwrap();
             }
             if !self.desired_append_char(
-                /*offset_in_cmdline=*/
-                if i <= explicit_before_suggestion.len() + layout.autosuggestion.len() {
-                    i.min(explicit_before_suggestion.len())
+                if pager.search_field_shown {
+                    CharOffset::None
+                } else if i < explicit_before_suggestion.len() {
+                    CharOffset::Cmd(i)
+                } else if i < explicit_before_suggestion.len() + layout.autosuggestion.len() {
+                    CharOffset::Pointer(explicit_before_suggestion.len())
                 } else {
-                    i - layout.autosuggestion.len()
+                    CharOffset::Cmd(i - layout.autosuggestion.len())
                 },
                 if is_final_rendering {
                     usize::MAX
@@ -413,7 +447,30 @@ impl Screen {
             i += 1;
         };
 
-        let full_line_count = self.desired.cursor.y + 1;
+        // Add an empty line if there are no lines or if the last line was soft wrapped (but not by autosuggestion).
+        if self.desired.line_datas.last().is_none_or(|line| {
+            line.len() == screen_width
+                && (commandline.is_empty()
+                    || autosuggestion.is_empty()
+                    || !explicit_after_suggestion.is_empty())
+        }) {
+            self.desired.add_line();
+        }
+
+        let full_line_count = self.desired.cursor.y
+            - if self.desired.cursor.x == 0
+                && self
+                    .desired
+                    .cursor
+                    .y
+                    .checked_sub(1)
+                    .is_some_and(|y| self.desired.line_datas[y].is_soft_wrapped)
+            {
+                1
+            } else {
+                0
+            }
+            + calc_prompt_lines(&layout.left_prompt);
         let pager_available_height = std::cmp::max(
             1,
             curr_termsize
@@ -484,9 +541,12 @@ impl Screen {
             // by lying to ourselves and claiming that we're really below what we consider "line 0"
             // (which is the last line of the prompt). This will cause us to move up to try to get back
             // to line 0, but really we're getting back to the initial line of the prompt.
-            let prompt_line_count = calc_prompt_lines(&self.actual_left_prompt);
+            let prompt_line_count = self
+                .actual_left_prompt
+                .as_ref()
+                .map_or(1, |p| calc_prompt_lines(p));
             self.actual.cursor.y += prompt_line_count.checked_sub(1).unwrap();
-            self.actual_left_prompt.clear();
+            self.actual_left_prompt = None;
         }
         self.actual.resize(0);
         self.need_clear_lines = true;
@@ -498,13 +558,12 @@ impl Screen {
         self.save_status();
     }
 
-    pub fn move_to_end(&mut self) {
-        self.r#move(0, self.actual.line_count());
-    }
-
     pub fn push_to_scrollback(&mut self, cursor_y: usize) {
         let prompt_y = self.command_line_y_given_cursor_y(cursor_y);
-        let trailing_prompt_lines = calc_prompt_lines(&self.actual_left_prompt) - 1;
+        let trailing_prompt_lines = self
+            .actual_left_prompt
+            .as_ref()
+            .map_or(0, |p| calc_prompt_lines(p) - 1);
         let lines_to_scroll = prompt_y
             .checked_sub(trailing_prompt_lines)
             .unwrap_or_else(|| {
@@ -522,17 +581,14 @@ impl Screen {
             return;
         }
         let zelf = self.scoped_buffer();
-        let Some(term) = term() else {
-            return;
-        };
         let mut out = zelf.outp.borrow_mut();
         let lines_to_scroll = i32::try_from(lines_to_scroll).unwrap();
         // Scroll down.
+        assert!(SCROLL_FORWARD_SUPPORTED.load());
         out.tputs_bytes(format!("\x1b[{}S", lines_to_scroll).as_bytes());
+        assert!(CURSOR_UP_SUPPORTED.load());
         // Reposition cursor.
-        if let Some(up) = term.parm_cursor_up.as_ref() {
-            out.tputs_if_some(&tparm1(up, lines_to_scroll));
-        }
+        out.tputs_bytes(format!("\x1b[{}A", lines_to_scroll).as_bytes());
     }
 
     fn command_line_y_given_cursor_y(&mut self, viewport_cursor_y: usize) -> usize {
@@ -553,7 +609,7 @@ impl Screen {
         &mut self,
         viewport_position: ViewportPosition,
         viewport_cursor: ViewportPosition,
-    ) -> usize {
+    ) -> CharOffset {
         let viewport_prompt_y = self.command_line_y_given_cursor_y(viewport_cursor.y);
         let y = viewport_position
             .y
@@ -574,14 +630,21 @@ impl Screen {
         let x = viewport_position.x - viewport_prompt_x;
         let line = self.actual.line(y);
         let x = x.max(line.indentation);
-        if x >= line.len() {
-            if self.actual.line_count() == 1 {
-                0
+        let offset = line
+            .text
+            .get(x)
+            .or(line.text.last())
+            .or(if y > 0 {
+                self.actual.line(y - 1).text.last()
             } else {
-                line.text.last().unwrap().offset_in_cmdline + 1
-            }
-        } else {
-            line.offset_in_cmdline_at(x)
+                None
+            })
+            .map(|char| char.offset_in_cmdline)
+            .unwrap_or(CharOffset::Pointer(0));
+        match offset {
+            CharOffset::Cmd(value) if x >= line.len() => CharOffset::Cmd(value + 1),
+            CharOffset::Pager(_) if x >= line.len() => CharOffset::None,
+            offset => offset,
         }
     }
 
@@ -592,14 +655,14 @@ impl Screen {
     pub fn reset_abandoning_line(&mut self, screen_width: usize) {
         self.actual.cursor.y = 0;
         self.actual.resize(0);
-        self.actual_left_prompt.clear();
+        self.actual_left_prompt = None;
         self.need_clear_lines = true;
 
         // Do the PROMPT_SP hack.
         let mut abandon_line_string = WString::with_capacity(screen_width + 32);
 
         // Don't need to check for fish_wcwidth errors; this is done when setting up
-        // omitted_newline_char in common.cpp.
+        // omitted_newline_char in common.rs.
         let non_space_width = get_omitted_newline_width();
         let term = term();
         let term = term.as_ref();
@@ -614,7 +677,7 @@ impl Screen {
                 true
             };
             if let Some(enter_dim_mode) = term.and_then(|term| term.enter_dim_mode.as_ref()) {
-                if add(&mut abandon_line_string, tparm0(enter_dim_mode)) {
+                if add(&mut abandon_line_string, Some(enter_dim_mode.clone())) {
                     // Use dim if they have it, so the color will be based on their actual normal
                     // color and the background of the terminal.
                     justgrey = false;
@@ -634,7 +697,7 @@ impl Screen {
                 } else if max_colors >= 2 {
                     if let Some(enter_bold_mode) = term.unwrap().enter_bold_mode.as_ref() {
                         // we might still get that color by setting black and going bold for bright
-                        add(&mut abandon_line_string, tparm0(enter_bold_mode));
+                        add(&mut abandon_line_string, Some(enter_bold_mode.clone()));
                         add(&mut abandon_line_string, tparm1(set_a_foreground, 0));
                     }
                 }
@@ -646,7 +709,7 @@ impl Screen {
                 term.and_then(|term| term.exit_attribute_mode.as_ref())
             {
                 // normal text ANSI escape sequence
-                add(&mut abandon_line_string, tparm0(exit_attribute_mode));
+                add(&mut abandon_line_string, Some(exit_attribute_mode.clone()));
             }
 
             let newline_glitch_width = if TERM_HAS_XN.load(Ordering::Relaxed) {
@@ -689,7 +752,7 @@ impl Screen {
     /// Stat stdout and stderr and save result as the current timestamp.
     /// This is used to avoid reacting to changes that we ourselves made to the screen.
     pub fn save_status(&mut self) {
-        (self.mtime_stdout, self.mtime_stderr) = mtime_stdout_stderr();
+        self.mtime_stdout_stderr = mtime_stdout_stderr();
     }
 
     /// Return whether we believe the cursor is wrapped onto the last line, and that line is
@@ -706,7 +769,7 @@ impl Screen {
     /// automatically handles linebreaks and lines longer than the screen width.
     fn desired_append_char(
         &mut self,
-        offset_in_cmdline: usize,
+        offset_in_cmdline: CharOffset,
         max_y: usize,
         b: char,
         c: HighlightSpec,
@@ -798,14 +861,10 @@ impl Screen {
             return;
         }
 
-        let mtime_out = fstat(STDOUT_FILENO).and_then(|md| md.modified()).ok();
-        let mtime_err = fstat(STDERR_FILENO).and_then(|md| md.modified()).ok();
-        let changed = self.mtime_stdout != mtime_out || self.mtime_stderr != mtime_err;
-
-        if changed {
+        if self.mtime_stdout_stderr != mtime_stdout_stderr() {
             // Ok, someone has been messing with our screen. We will want to repaint. However, we do not
             // know where the cursor is. It is our best bet that we are still on the same line, so we
-            // move to the beginning of the line, reset the modelled screen contents, and then set the
+            // move to the beginning of the line, reset the modeled screen contents, and then set the
             // modeled cursor y-pos to its earlier value.
             let prev_line = self.actual.cursor.y;
             self.reset_line(true /* repaint prompt */);
@@ -910,9 +969,9 @@ impl Screen {
     }
 
     /// Convert a wide character to a multibyte string and append it to the buffer.
-    fn write_char(&mut self, c: char, width: isize) {
+    fn write_char(&mut self, c: char, width: usize) {
         let mut zelf = self.scoped_buffer();
-        zelf.actual.cursor.x = zelf.actual.cursor.x.wrapping_add(width as usize);
+        zelf.actual.cursor.x = zelf.actual.cursor.x.wrapping_add(width);
         zelf.outp.borrow_mut().writech(c);
         if Some(zelf.actual.cursor.x) == zelf.actual.screen_width && allow_soft_wrap() {
             zelf.soft_wrap_location = Some(Cursor {
@@ -958,13 +1017,21 @@ impl Screen {
             .is_some_and(|swl| (x, y) == (swl.x, swl.y))
         {
             // We can soft wrap; but do we want to?
-            if self.desired.line(y - 1).is_soft_wrapped && allow_soft_wrap() {
+            if self.desired.line(y - 1).is_soft_wrapped {
                 // Yes. Just update the actual cursor; that will cause us to elide emitting the commands
                 // to move here, so we will just output on "one big line" (which the terminal soft
                 // wraps.
                 self.actual.cursor = self.soft_wrap_location.unwrap();
             }
         }
+    }
+
+    fn should_wrap(&self, i: usize) -> bool {
+        allow_soft_wrap()
+            && self.desired.line(i).is_soft_wrapped
+            && i + 1 < self.desired.line_count()
+            && !(i + 1 < self.actual.line_count()
+                && line_shared_prefix(self.actual.line(i + 1), self.desired.line(i + 1)) > 0)
     }
 
     fn scoped_buffer(&mut self) -> impl ScopeGuarding<Target = &mut Screen> {
@@ -1037,14 +1104,18 @@ impl Screen {
         let term = term.as_ref();
 
         // Output the left prompt if it has changed.
-        if zelf.scrolled && !is_final_rendering {
+        if zelf.scrolled() && !is_final_rendering {
             zelf.r#move(0, 0);
-            zelf.outp
-                .borrow_mut()
-                .tputs_if_some(&term.and_then(|term| term.clr_eol.as_ref()));
-            zelf.actual_left_prompt.clear();
+            zelf.write_mbs_if_some(&term.and_then(|term| term.clr_eol.as_ref()));
+            zelf.actual_left_prompt = None;
             zelf.actual.cursor.x = 0;
-        } else if left_prompt != zelf.actual_left_prompt || (zelf.scrolled && is_final_rendering) {
+        } else if zelf
+            .actual_left_prompt
+            .as_ref()
+            .is_none_or(|p| p != left_prompt)
+            || (zelf.scrolled() && is_final_rendering)
+            || Some(left_prompt_width) == screen_width && zelf.should_wrap(0)
+        {
             zelf.r#move(0, 0);
             let mut start = 0;
             let osc_133_prompt_start =
@@ -1052,19 +1123,29 @@ impl Screen {
             if left_prompt_layout.line_breaks.is_empty() {
                 osc_133_prompt_start(&mut zelf);
             }
-            for (i, &line_break) in left_prompt_layout.line_breaks.iter().enumerate() {
-                zelf.outp
-                    .borrow_mut()
-                    .tputs_if_some(&term.and_then(|term| term.clr_eol.as_ref()));
-                if i == 0 {
-                    osc_133_prompt_start(&mut zelf);
+            if zelf
+                .actual_left_prompt
+                .as_ref()
+                .is_none_or(|p| p != left_prompt)
+                || (zelf.scrolled() && is_final_rendering)
+            {
+                for (i, &line_break) in left_prompt_layout.line_breaks.iter().enumerate() {
+                    zelf.write_mbs_if_some(&term.and_then(|term| term.clr_eol.as_ref()));
+                    if i == 0 {
+                        osc_133_prompt_start(&mut zelf);
+                    }
+                    zelf.write_str(&left_prompt[start..=line_break]);
+                    start = line_break + 1;
                 }
-                zelf.write_str(&left_prompt[start..=line_break]);
-                start = line_break + 1;
+            } else {
+                start = left_prompt_layout.line_breaks.last().map_or(0, |lb| lb + 1);
             }
             zelf.write_str(&left_prompt[start..]);
-            zelf.actual_left_prompt = left_prompt.to_owned();
+            zelf.actual_left_prompt = Some(left_prompt.to_owned());
             zelf.actual.cursor.x = left_prompt_width;
+            if Some(left_prompt_width) == screen_width && zelf.should_wrap(0) {
+                zelf.soft_wrap_location = Some(Cursor { x: 0, y: 1 });
+            }
         }
 
         fn o_line(zelf: &Screen, i: usize) -> &Line {
@@ -1077,8 +1158,8 @@ impl Screen {
         // Output all lines.
         for i in 0..zelf.desired.line_count() {
             zelf.actual.create_line(i);
-
-            let start_pos = if i == 0 { left_prompt_width } else { 0 };
+            let is_first_line = i == 0 && !zelf.scrolled();
+            let start_pos = if is_first_line { left_prompt_width } else { 0 };
             let mut current_width = 0;
             let mut has_cleared_line = false;
 
@@ -1094,7 +1175,7 @@ impl Screen {
             // Note that skip_remaining is a width, not a character count.
             let mut skip_remaining = start_pos;
 
-            let shared_prefix = if zelf.scrolled {
+            let shared_prefix = if zelf.scrolled() {
                 0
             } else {
                 line_shared_prefix(o_line(&zelf, i), s_line(&zelf, i))
@@ -1133,21 +1214,12 @@ impl Screen {
                 }
             }
 
-            if !should_clear_screen_this_line {
+            if !should_clear_screen_this_line && zelf.should_wrap(i) {
                 // If we're soft wrapped, and if we're going to change the first character of the next
                 // line, don't skip over the last two characters so that we maintain soft-wrapping.
-                if o_line(&zelf, i).is_soft_wrapped && i + 1 < zelf.desired.line_count() {
-                    let mut next_line_will_change = true;
-                    if i + 1 < zelf.actual.line_count() {
-                        if line_shared_prefix(zelf.desired.line(i + 1), zelf.actual.line(i + 1)) > 0
-                        {
-                            next_line_will_change = false;
-                        }
-                    }
-                    if next_line_will_change {
-                        skip_remaining =
-                            std::cmp::min(skip_remaining, zelf.actual.screen_width.unwrap() - 2);
-                    }
+                skip_remaining = skip_remaining.min(screen_width.unwrap() - 2);
+                if is_first_line {
+                    skip_remaining = skip_remaining.max(left_prompt_width);
                 }
             }
 
@@ -1155,20 +1227,10 @@ impl Screen {
             let mut j = 0;
             while j < o_line(&zelf, i).len() {
                 let width = wcwidth_rendered_min_0(o_line(&zelf, i).char_at(j));
-                if skip_remaining < width {
+                if current_width + width > skip_remaining {
                     break;
                 }
-                skip_remaining -= width;
                 current_width += width;
-                j += 1;
-            }
-
-            // Skip over zero-width characters (e.g. combining marks at the end of the prompt).
-            while j < o_line(&zelf, i).len() {
-                let width = wcwidth_rendered_min_0(o_line(&zelf, i).char_at(j));
-                if width > 0 {
-                    break;
-                }
                 j += 1;
             }
 
@@ -1199,7 +1261,7 @@ impl Screen {
                 set_color(&mut zelf, color);
                 let ch = o_line(&zelf, i).char_at(j);
                 let width = wcwidth_rendered_min_0(ch);
-                zelf.write_char(ch, isize::try_from(width).unwrap());
+                zelf.write_char(ch, width);
                 current_width += width;
                 j += 1;
             }
@@ -1237,7 +1299,7 @@ impl Screen {
             }
 
             // Output any rprompt if this is the first line.
-            if i == 0 && right_prompt_width > 0 {
+            if is_first_line && right_prompt_width > 0 {
                 // Move the cursor to the beginning of the line first to be independent of the width.
                 // This helps prevent staircase effects if fish and the terminal disagree.
                 zelf.r#move(0, 0);
@@ -1343,7 +1405,7 @@ pub struct LayoutCache {
 }
 
 // Singleton of the cached escape sequences seen in prompts and similar strings.
-// Note this is deliberately exported so that init_curses can clear it.
+// Note this is deliberately exported so that init_terminal can clear it.
 pub static LAYOUT_CACHE_SHARED: Mutex<LayoutCache> = Mutex::new(LayoutCache::new());
 
 impl LayoutCache {
@@ -1444,7 +1506,7 @@ impl LayoutCache {
             if endc != '\0' {
                 if endc == '\n' || endc == '\x0C' {
                     layout.line_breaks.push(trunc_prompt.len());
-                    // If the prompt ends in a new line, that's one empy last line.
+                    // If the prompt ends in a new line, that's one empty last line.
                     if run_end == prompt_str.len() - 1 {
                         layout.last_line_width = 0;
                     }
@@ -1710,10 +1772,7 @@ fn is_visual_escape_seq(code: &wstr) -> Option<usize> {
         let Some(p) = p else { continue };
         // Test both padded and unpadded version, just to be safe. Most versions of fish_tparm don't
         // actually seem to do anything these days.
-        let esc_seq_len = std::cmp::max(
-            try_sequence(tparm0(p).unwrap().as_bytes(), code),
-            try_sequence(p.as_bytes(), code),
-        );
+        let esc_seq_len = try_sequence(p.as_bytes(), code);
         if esc_seq_len != 0 {
             return Some(esc_seq_len);
         }
@@ -1865,7 +1924,7 @@ fn line_shared_prefix(a: &Line, b: &Line) -> usize {
 }
 
 /// Returns true if we are using a dumb terminal.
-fn is_dumb() -> bool {
+pub(crate) fn is_dumb() -> bool {
     term().is_none_or(|term| {
         term.cursor_up.is_none()
             || term.cursor_down.is_none()
@@ -1891,16 +1950,14 @@ pub(crate) struct ScreenLayout {
 // truncated at that offset, return the offset that fits in the given width. Returns
 // width_by_offset.size() - 1 if they all fit. The first value in width_by_offset is assumed to be
 // 0.
-fn truncation_offset_for_width(width_by_offset: &[usize], max_width: usize) -> usize {
-    assert!(width_by_offset[0] == 0);
-    let mut i = 1;
-    while i < width_by_offset.len() {
-        if width_by_offset[i] > max_width {
-            break;
-        }
+fn truncation_offset_for_width(str: &wstr, max_width: usize) -> usize {
+    let mut i = 0;
+    let mut width = 0;
+    while i < str.len() && width <= max_width {
+        width += wcwidth_rendered_min_0(str.char_at(i));
         i += 1;
     }
-    // i is the first index that did not fit; i-1 is therefore the last that did.
+    // i is the first index that did not fit; i - 1 is therefore the last that did.
     i - 1
 }
 
@@ -1915,8 +1972,6 @@ pub(crate) fn compute_layout(
     indent: &mut Vec<i32>,
     autosuggestion_str: &wstr,
 ) -> ScreenLayout {
-    let mut result = ScreenLayout::default();
-
     // Truncate both prompts to screen width (#904).
     let mut left_prompt = WString::new();
     let left_prompt_layout = LAYOUT_CACHE_SHARED.lock().unwrap().calc_prompt_layout(
@@ -1935,15 +1990,6 @@ pub(crate) fn compute_layout(
     let left_prompt_width = left_prompt_layout.last_line_width;
     let mut right_prompt_width = right_prompt_layout.last_line_width;
 
-    if left_prompt_width + right_prompt_width > screen_width {
-        // Nix right_prompt.
-        right_prompt.truncate(0);
-        right_prompt_width = 0;
-    }
-
-    // Now we should definitely fit.
-    assert!(left_prompt_width + right_prompt_width <= screen_width);
-
     // Get the width of the first line, and if there is more than one line.
     let first_command_line_width: usize = line_at_cursor(commandline_before_suggestion, 0)
         .chars()
@@ -1956,89 +2002,67 @@ pub(crate) fn compute_layout(
     .chars()
     .map(wcwidth_rendered_min_0)
     .sum();
+    let autosuggest_total_width = autosuggestion_str.chars().map(wcwidth_rendered_min_0).sum();
 
-    let mut autosuggest_total_width = 0;
-    let mut autosuggest_truncated_widths = Vec::with_capacity(autosuggestion_str.len());
-    for c in autosuggestion_str.chars() {
-        autosuggest_truncated_widths.push(autosuggest_total_width);
-        autosuggest_total_width += wcwidth_rendered_min_0(c);
-    }
-
-    // Here are the layouts we try in turn:
+    // Here are the layouts we try:
+    // 1. Right prompt visible.
+    // 2. Right prompt hidden.
+    // 3. Newline separator (right prompt hidden).
     //
-    // 1. Left prompt visible, right prompt visible, command line visible, autosuggestion visible.
+    // Left prompt and command line are always visible.
+    // Autosuggestion is truncated to fit on the line (possibly to ellipsis_char or not at all).
     //
-    // 2. Left prompt visible, right prompt visible, command line visible, autosuggestion truncated
-    // (possibly to zero).
-    //
-    // 3. Left prompt visible, right prompt hidden, command line visible, autosuggestion visible
-    //
-    // 4. Left prompt visible, right prompt hidden, command line visible, autosuggestion truncated
-    //
-    // 5. Newline separator (left prompt visible, right prompt hidden, command line visible,
-    // autosuggestion visible).
-    //
-    // A remark about layout #4: if we've pushed the command line to a new line, why can't we draw
+    // A remark about layout #3: if we've pushed the command line to a new line, why can't we draw
     // the right prompt? The issue is resizing: if you resize the window smaller, then the right
     // prompt will wrap to the next line. This means that we can't go back to the line that we were
     // on, and things turn to chaos very quickly.
 
-    let mut truncated_autosuggestion = |indent: &mut Vec<i32>, right_prompt_width: usize| {
-        let width = if let Some(pos) = commandline_before_suggestion
-            .chars()
-            .rposition(|c| c == '\n')
-        {
-            left_prompt_width
-                + usize::try_from(indent[pos]).unwrap() * INDENT_STEP
-                + autosuggestion_line_explicit_width
-        } else {
-            left_prompt_width + right_prompt_width + first_command_line_width
-        };
-        // Need at least two characters to show an autosuggestion.
-        let available_autosuggest_space = screen_width.saturating_sub(width);
-        let mut result = WString::new();
-        if available_autosuggest_space > autosuggest_total_width {
-            result = autosuggestion_str.to_owned();
-        } else if autosuggest_total_width > 0 && available_autosuggest_space > 2 {
-            let truncation_offset = truncation_offset_for_width(
-                &autosuggest_truncated_widths,
-                available_autosuggest_space - 2,
-            );
-            result = autosuggestion_str[..truncation_offset].to_owned();
-            result.push(ellipsis_char);
-        }
-        let suggestion_start = commandline_before_suggestion.len();
-        let truncation_range =
-            suggestion_start + result.len()..suggestion_start + autosuggestion_str.len();
-        colors.drain(truncation_range.clone());
-        indent.drain(truncation_range);
-        result
-    };
+    let mut result = ScreenLayout::default();
 
-    // Case 1 and 2. Note that we require strict inequality so that there's always at least
-    // one space between the left edge and the rprompt.
-    let calculated_width = left_prompt_width + right_prompt_width + first_command_line_width;
-    if calculated_width <= screen_width {
-        result.left_prompt = left_prompt;
-        result.left_prompt_space = left_prompt_width;
-        result.right_prompt = right_prompt;
-        result.autosuggestion = truncated_autosuggestion(indent, right_prompt_width);
-        return result;
-    }
-
-    // Case 3 and 4
-    let calculated_width = left_prompt_width + first_command_line_width;
-    if calculated_width <= screen_width {
-        result.left_prompt = left_prompt;
-        result.left_prompt_space = left_prompt_width;
-        result.autosuggestion = truncated_autosuggestion(indent, 0);
-        return result;
-    }
-
-    // Case 5
+    // Always visible.
     result.left_prompt = left_prompt;
     result.left_prompt_space = left_prompt_width;
-    result.autosuggestion = autosuggestion_str.to_owned();
+
+    // Hide the right prompt if it doesn't fit on the first line.
+    if left_prompt_width + first_command_line_width + right_prompt_width < screen_width {
+        result.right_prompt = right_prompt;
+    } else {
+        right_prompt_width = 0;
+    }
+
+    // Now we should definitely fit.
+    assert!(left_prompt_width + right_prompt_width <= screen_width);
+
+    // Calculate space available for autosuggestion.
+    let width = (left_prompt_width
+        + autosuggestion_line_explicit_width
+        + commandline_before_suggestion
+            .chars()
+            .rposition(|c| c == '\n')
+            .map_or(right_prompt_width, |pos| {
+                usize::try_from(indent[pos]).unwrap() * INDENT_STEP
+            }))
+        % screen_width;
+    let available_autosuggest_space = screen_width - width;
+
+    // Truncate the autosuggestion to fit on the line.
+    let mut autosuggestion = WString::new();
+    if available_autosuggest_space >= autosuggest_total_width {
+        autosuggestion = autosuggestion_str.to_owned();
+    } else if autosuggest_total_width > 0 {
+        let truncation_offset =
+            truncation_offset_for_width(autosuggestion_str, available_autosuggest_space - 1);
+        autosuggestion = autosuggestion_str[..truncation_offset].to_owned();
+        autosuggestion.push(ellipsis_char);
+    }
+
+    let suggestion_start = commandline_before_suggestion.len();
+    let truncation_range =
+        suggestion_start + autosuggestion.len()..suggestion_start + autosuggestion_str.len();
+    colors.drain(truncation_range.clone());
+    indent.drain(truncation_range);
+    result.autosuggestion = autosuggestion;
+
     result
 }
 

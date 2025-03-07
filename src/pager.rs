@@ -13,7 +13,7 @@ use crate::future::IsSomeAnd;
 use crate::highlight::{highlight_shell, HighlightRole, HighlightSpec};
 use crate::libc::MB_CUR_MAX;
 use crate::operation_context::OperationContext;
-use crate::screen::{wcswidth_rendered, wcwidth_rendered, Line, ScreenData};
+use crate::screen::{wcswidth_rendered, wcwidth_rendered, CharOffset, Line, ScreenData};
 use crate::termsize::Termsize;
 use crate::wchar::prelude::*;
 use crate::wcstringutil::string_fuzzy_match_string;
@@ -253,9 +253,7 @@ impl Pager {
         assert!(stop_row <= row_count);
         assert!(stop_row - start_row <= term_height);
         // This always printed at the end of the command line.
-        let offset_in_cmdline = usize::MAX;
         self.completion_print(
-            offset_in_cmdline,
             cols,
             &width_by_column,
             start_row,
@@ -295,12 +293,9 @@ impl Pager {
 
         if !progress_text.is_empty() {
             let line = rendering.screen_data.add_line();
-            let spec = HighlightSpec::with_fg_bg(
-                HighlightRole::pager_progress,
-                HighlightRole::pager_progress,
-            );
+            let spec = HighlightSpec::with_both(HighlightRole::pager_progress);
             print_max(
-                offset_in_cmdline,
+                CharOffset::None,
                 &progress_text,
                 spec,
                 term_width,
@@ -329,7 +324,7 @@ impl Pager {
 
         let mut search_field_remaining = term_width - 1;
         search_field_remaining -= print_max(
-            offset_in_cmdline,
+            CharOffset::None,
             wgettext!(SEARCH_FIELD_PROMPT),
             HighlightSpec::new(),
             search_field_remaining,
@@ -337,7 +332,7 @@ impl Pager {
             search_field,
         );
         search_field_remaining -= print_max(
-            offset_in_cmdline,
+            CharOffset::None,
             &search_field_text,
             underline,
             search_field_remaining,
@@ -407,7 +402,6 @@ impl Pager {
     /// \param lst The list of completions to print
     fn completion_print(
         &self,
-        offset_in_cmdline: usize,
         cols: usize,
         width_by_column: &[usize; PAGER_MAX_COLS],
         row_start: usize,
@@ -437,7 +431,7 @@ impl Pager {
 
                 // Print this completion on its own "line".
                 let mut line = self.completion_print_item(
-                    offset_in_cmdline,
+                    CharOffset::Pager(idx),
                     prefix,
                     el,
                     col_width,
@@ -447,7 +441,7 @@ impl Pager {
 
                 // If there's more to come, append two spaces.
                 if col + 1 < cols {
-                    line.append_str(PAGER_SPACER_STRING, HighlightSpec::new(), offset_in_cmdline);
+                    line.append_str(PAGER_SPACER_STRING, HighlightSpec::new(), CharOffset::None);
                 }
 
                 // Append this to the real line.
@@ -462,7 +456,7 @@ impl Pager {
     /// Print the specified item using at the specified amount of space.
     fn completion_print_item(
         &self,
-        offset_in_cmdline: usize,
+        offset_in_cmdline: CharOffset,
         prefix: &wstr,
         c: &PagerComp,
         width: usize,
@@ -509,15 +503,17 @@ impl Pager {
         let bg_role = modify_role(HighlightRole::pager_background);
         let bg = HighlightSpec::with_bg(bg_role);
         let prefix_col = HighlightSpec::with_fg_bg(
-            if self.highlight_prefix {
+            modify_role(if self.highlight_prefix {
                 HighlightRole::pager_prefix
             } else {
                 HighlightRole::pager_completion
-            },
+            }),
             bg_role,
         );
-        let comp_col = HighlightSpec::with_fg_bg(HighlightRole::pager_completion, bg_role);
-        let desc_col = HighlightSpec::with_fg_bg(HighlightRole::pager_description, bg_role);
+        let comp_col =
+            HighlightSpec::with_fg_bg(modify_role(HighlightRole::pager_completion), bg_role);
+        let desc_col =
+            HighlightSpec::with_fg_bg(modify_role(HighlightRole::pager_description), bg_role);
 
         // Print the completion part
         let mut comp_remaining = comp_width;
@@ -1100,7 +1096,7 @@ fn divide_round_up(numer: usize, denom: usize) -> usize {
 /// \param has_more if this flag is true, this is not the entire string, and the string should be
 /// ellipsized even if the string fits but takes up the whole space.
 fn print_max_impl(
-    offset_in_cmdline: usize,
+    offset_in_cmdline: CharOffset,
     s: &wstr,
     color: impl Fn(usize) -> HighlightSpec,
     max: usize,
@@ -1136,7 +1132,7 @@ fn print_max_impl(
 }
 
 fn print_max(
-    offset_in_cmdline: usize,
+    offset_in_cmdline: CharOffset,
     s: &wstr,
     color: HighlightSpec,
     max: usize,

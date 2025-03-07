@@ -1,19 +1,23 @@
 use crate::common::{escape, get_by_sorted_name, str2wcstring, Named};
-use crate::curses;
-use crate::env::{Environment, CURSES_INITIALIZED};
+use crate::env::Environment;
 use crate::event;
 use crate::flog::FLOG;
+// Polyfill for Option::is_none_or(), stabilized in 1.82.0
+#[allow(unused_imports)]
+use crate::future::IsSomeAnd;
 use crate::input_common::{
-    CharEvent, CharInputStyle, ImplicitEvent, InputData, InputEventQueuer, ReadlineCmd,
-    WaitingForCursorPosition, R_END_INPUT_FUNCTIONS,
+    BlockingWait, CharEvent, CharInputStyle, CursorPositionWait, ImplicitEvent, InputData,
+    InputEventQueuer, ReadlineCmd, R_END_INPUT_FUNCTIONS,
 };
 use crate::key::ViewportPosition;
 use crate::key::{self, canonicalize_raw_escapes, ctrl, Key, Modifiers};
+use crate::output::Outputter;
 use crate::proc::job_reap;
 use crate::reader::{
     reader_reading_interrupted, reader_reset_interrupted, reader_schedule_prompt_repaint, Reader,
 };
 use crate::signal::signal_clear_cancel;
+use crate::terminal;
 use crate::threads::{assert_is_main_thread, iothread_service_main};
 use crate::wchar::prelude::*;
 use once_cell::sync::{Lazy, OnceCell};
@@ -144,8 +148,8 @@ const INPUT_FUNCTION_METADATA: &[InputFunctionMetadata] = &[
     make_md(L!("beginning-of-line"), ReadlineCmd::BeginningOfLine),
     make_md(L!("cancel"), ReadlineCmd::Cancel),
     make_md(L!("cancel-commandline"), ReadlineCmd::CancelCommandline),
-    make_md(L!("cancel-commandline-traditional"), ReadlineCmd::CancelCommandlineTraditional),
     make_md(L!("capitalize-word"), ReadlineCmd::CapitalizeWord),
+    make_md(L!("clear-commandline"), ReadlineCmd::ClearCommandline),
     make_md(L!("clear-screen"), ReadlineCmd::ClearScreenAndRepaint),
     make_md(L!("complete"), ReadlineCmd::Complete),
     make_md(L!("complete-and-search"), ReadlineCmd::CompleteAndSearch),
@@ -170,7 +174,9 @@ const INPUT_FUNCTION_METADATA: &[InputFunctionMetadata] = &[
     make_md(L!("forward-single-char"), ReadlineCmd::ForwardSingleChar),
     make_md(L!("forward-token"), ReadlineCmd::ForwardToken),
     make_md(L!("forward-word"), ReadlineCmd::ForwardWord),
+    make_md(L!("history-delete"), ReadlineCmd::HistoryDelete),
     make_md(L!("history-pager"), ReadlineCmd::HistoryPager),
+    #[allow(deprecated)]
     make_md(L!("history-pager-delete"), ReadlineCmd::HistoryPagerDelete),
     make_md(L!("history-prefix-search-backward"), ReadlineCmd::HistoryPrefixSearchBackward),
     make_md(L!("history-prefix-search-forward"), ReadlineCmd::HistoryPrefixSearchForward),
@@ -456,19 +462,19 @@ impl<'a> InputEventQueuer for Reader<'a> {
         )));
     }
 
-    fn is_waiting_for_cursor_position(&self) -> bool {
-        self.waiting_for_cursor_position.is_some()
+    fn is_blocked(&self) -> bool {
+        self.blocking_wait().is_some()
     }
-    fn cursor_position_wait_reason(&self) -> &Option<WaitingForCursorPosition> {
-        &self.waiting_for_cursor_position
-    }
-    fn stop_waiting_for_cursor_position(&mut self) -> bool {
-        self.waiting_for_cursor_position.take().is_some()
+    fn blocking_wait(&self) -> MutexGuard<Option<BlockingWait>> {
+        self.data.blocking_wait()
     }
 
     fn on_mouse_left_click(&mut self, position: ViewportPosition) {
         FLOG!(reader, "Mouse left click", position);
-        self.request_cursor_position(WaitingForCursorPosition::MouseLeft(position));
+        self.request_cursor_position(
+            &mut Outputter::stdoutput().borrow_mut(),
+            Some(CursorPositionWait::MouseLeft(position)),
+        );
     }
 }
 
@@ -964,7 +970,7 @@ impl InputMappingSet {
         } else {
             &mut self.preset_mapping_list
         };
-        let should_erase = |m: &InputMapping| mode.is_none() || mode.unwrap() == m.mode;
+        let should_erase = |m: &InputMapping| mode.is_none_or(|x| x == m.mode);
         ml.retain(|m| !should_erase(m));
     }
 
@@ -1016,9 +1022,8 @@ impl InputMappingSet {
 
 /// Create a list of terminfo mappings.
 fn create_input_terminfo() -> Box<[TerminfoMapping]> {
-    assert!(CURSES_INITIALIZED.load(Ordering::Relaxed));
-    let Some(term) = curses::term() else {
-        // setupterm() failed so we can't reference any key definitions.
+    let Some(term) = terminal::term() else {
+        // loading terminfo failed so we can't reference any key definitions.
         return Box::new([]);
     };
 

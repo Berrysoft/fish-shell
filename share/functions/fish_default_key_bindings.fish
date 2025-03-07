@@ -23,8 +23,6 @@ function fish_default_key_bindings -d "emacs-like key binds"
     __fish_shared_key_bindings $argv
     or return # protect against invalid $argv
 
-    bind --preset $argv ctrl-k kill-line
-
     bind --preset $argv right forward-char
     bind --preset $argv left backward-char
     $legacy_bind --preset $argv -k right forward-char
@@ -57,18 +55,19 @@ function fish_default_key_bindings -d "emacs-like key binds"
     bind --preset $argv alt-u upcase-word
 
     bind --preset $argv alt-c capitalize-word
-    bind --preset $argv alt-backspace backward-kill-token
-    bind --preset $argv ctrl-backspace backward-kill-word
-    bind --preset $argv alt-delete kill-token
-    bind --preset $argv ctrl-delete kill-word
-    bind --preset $argv alt-b backward-word
-    bind --preset $argv alt-f forward-word
-    if test "$TERM_PROGRAM" = Apple_Terminal
-        # Terminal.app sends \eb for alt+left, \ef for alt+right.
-        # Yeah.
-        $legacy_bind --preset $argv alt-b prevd-or-backward-word
-        $legacy_bind --preset $argv alt-f nextd-or-forward-word
+    if test (__fish_uname) = Darwin
+        bind --preset $argv alt-backspace backward-kill-word
+        bind --preset $argv ctrl-backspace backward-kill-token
+        bind --preset $argv alt-delete kill-word
+        bind --preset $argv ctrl-delete kill-token
+    else
+        bind --preset $argv alt-backspace backward-kill-token
+        bind --preset $argv ctrl-backspace backward-kill-word
+        bind --preset $argv alt-delete kill-token
+        bind --preset $argv ctrl-delete kill-word
     end
+    bind --preset $argv alt-b prevd-or-backward-word
+    bind --preset $argv alt-f nextd-or-forward-word
 
     bind --preset $argv alt-\< beginning-of-buffer
     bind --preset $argv alt-\> end-of-buffer

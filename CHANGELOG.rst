@@ -3,23 +3,34 @@ fish 4.1.0 (released ???)
 
 Notable improvements and fixes
 ------------------------------
+- Compound commands (``begin; echo 1; echo 2; end``) can now be now be abbreviated using braces (``{ echo1; echo 2 }``), like in other shells.
 
 Deprecations and removed features
 ---------------------------------
+- Tokens like `{ echo, echo }`` in command position are no longer interpreted as brace expansion but as compound command.
 
 Scripting improvements
 ----------------------
 
 Interactive improvements
 ------------------------
-- Autosuggestions are now also provided in  multi-line command lines. Like `ctrl-r`, autosuggestions operate only on the current line.
+- Autosuggestions are now also provided in multi-line command lines. Like `ctrl-r`, autosuggestions operate only on the current line.
+- Autosuggestions used to not suggest multi-line commandlines from history; now autosuggestions include individual lines from multi-line command lines.
+- The history search now preserves ordering between :kbd:`ctrl-s` forward and :kbd:`ctrl-r` backward searches.
+- Left mouse click now can select pager items.
+- Instead of flashing all the text to the left of the cursor, fish now flashes the matched token during history token search, the completed token during completion (:issue:`11050`), the autosuggestion when deleting it, and the full command line in all other cases.
+- Pasted commands are now stripped of any ``$ `` prefix.
 
 New or improved bindings
 ^^^^^^^^^^^^^^^^^^^^^^^^
-- :kbd:`ctrl-z` (undo) after executing a command will restore the previous cursor position instead of placing the cursor at the end of the command line.
+- On non-macOS systems, :kbd:`alt-left`, :kbd:`alt-right`, :kbd:`alt-backspace`, :kbd:`alt-delete` no longer operate on punctuation-delimited words but on whole arguments, possibly including special characters like ``/`` and quoted spaces.
+  On macOS, the same corresponding :kbd:`ctrl-` prefixed keys operate on whole arguments.
+  Word operations are still available via the other respective modifier, same as in the browser.
 - The OSC 133 prompt marking feature has learned about kitty's ``click_events=1`` flag, which allows moving fish's cursor by clicking.
-- :kbd:`ctrl-l` no longer clears the screen but only pushes to the terminal's scrollback all text above the prompt (via a new special input function ``scrollback-push``).
-  You can restore previous behavior with `bind ctrl-l clear-screen`.
+- :kbd:`ctrl-l` now pushes all text located above the prompt to the terminal's scrollback, before clearing and redrawing the screen (via a new special input function ``scrollback-push``).
+  This feature depends on the terminal advertising via XTGETTCAP support for the ``indn`` and ``cuu`` terminfo capabilities,
+  and on the terminal supporting Synchronized Output (which is used by fish to detect features).
+  If any is missing, the binding falls back to ``clear-screen``.
 
 Completions
 ^^^^^^^^^^^
@@ -29,20 +40,19 @@ Improved terminal support
 
 Other improvements
 ------------------
+- ``fish_indent`` and ``fish_key_reader`` are now available as builtins, and if fish is called with that name it will act like the given tool (as a multi-call binary).
+  This allows truly distributing fish as a single file. (:issue:`10876`)
 
 For distributors
 ----------------
+- ``fish_indent`` and ``fish_key_reader`` are still built as separate binaries for now, but can also be replaced with a symlink if you want to save disk space.
 
-fish 4.0b1 (released December 17, 2024)
+--------------
+
+fish 4.0.0 (released February 27, 2025)
 =======================================
 
-These are the draft release notes for fish 4.0.0. Like this release of fish itself, they are in beta and are not complete. Please report any issues you find.
-
-.. ignore: 751 2037 2037 3017 3018 3162 3299 4770 4865 5284 5991 6981 6996 7172 9332 9439 9440 9442 9452 9469 9480 9482 9520 9536 9541 9542 9544 9554 9556 9559 9561 9563 9566 9567 9568 9573 9575 9576 9579 9585 9586 9588 9589 9591 9592 9593 9594 9599 9600 9603 9607 9608 9612 9613 9615 9616 9619 9621 9625 9626 9630 9636 9637 9638 9641 9642 9643 9653 9654 9658 9661 9666 9671 9673 9688 9725 9726 9729 9735 9739 9745 9746 9751 9754 9765 9767 9768 9771 9777 9778 9786 9816 9818 9821 9839 9845 9856 9859 9861 9863 9864 9867 9869 9873 9874 9879 9881 9893 9894 9896 9902 9916 9923 9925 9927 9928 9930 9947 9948 9950 9952 9962 9963 9966 9968 9980 9981 9984 9990 9991 10040 10061 10090 10101 10102 10108 10114 10115 10121 10128 10129 10143 10145 10146 10161 10173 10174 10175 10179 10180 10181 10182 10184 10185 10186 10188 10195 10198 10200 10201 10204 10210 10214 10219 10220 10222 10223 10227 10228 10232 10235 10237 10241 10243 10244 10245 10246 10251 10254 10260 10263 10267 10268 10270 10272 10276 10277 10278 10279 10281 10288 10290 10291 10293 10305 10306 10307 10308 10309 10316 10317 10321 10327 10328 10329 10330 10336 10338 10340 10342 10345 10346 10347 10348 10349 10353 10354 10355 10356 10357 10358 10360 10366 10368 10370 10371 10372 10373 10377 10379 10381 10388 10389 10390 10395 10398 10400 10403 10404 10407 10408 10409 10411 10412 10415 10417 10418 10427 10429 10434 10438 10439 10440 10441 10442 10443 10445 10446 10448 10450 10451 10452 10456 10457 10462 10463 10464 10466 10467 10471 10473 10474 10479 10481 10485 10486 10487 10490 10491 10492 10494 10499 10500 10503 10505 10507 10508 10509 10510 10511 10512 10513 10518 10519 10520 10524 10528 10529 10530 10538 10541 10542 10547 10548 10549 10555 10560 10562 10564 10565 10568 10569 10572 10573 10574 10575 10578 10580 10582 10583 10588 10591 10594 10595 10596 10609 10622 10623 10627 10628 10634 10635 10636 10637 10640 10646 10647 10649 10650 10652 10653 10654 10655 10657 10659 10662 10664 10667 10669 10670 10674 10679 10681 10685 10686 10687 10688 10689 10697 10698 10702 10707 10708 10712 10713 10716 10718 10719 10721 10726 10727 10728 10731 10760 10762 10763 10767 10770 10775 10776 10778 10779 10782 10784 10789 10792 10795 10796 10801 10812 10817 10825 10836 10839 10844 10845 10847 10851 10858 10863 10864 10873 10874 10880 10885 10891 10894 10907
-
-fish's core code has been ported from C++ to Rust (:issue:`9512`).
-This means a large change in dependencies and how to build fish.
-Packagers should see the :ref:`For Distributors <rust-packaging>` section at the end.
+fish's core code has been ported from C++ to Rust (:issue:`9512`). This means a large change in dependencies and how to build fish. However, there should be no direct impact on users. Packagers should see the :ref:`For Distributors <rust-packaging>` section at the end.
 
 Notable backwards-incompatible changes
 --------------------------------------
@@ -50,10 +60,7 @@ Notable backwards-incompatible changes
 - As part of a larger binding rework, ``bind`` gained a new key notation.
   In most cases the old notation should keep working, but in rare cases you may have to change a ``bind`` invocation to use the new notation.
   See :ref:`below <changelog-new-bindings>` for details.
-- Terminals that fail to ignore unrecognized OSC or CSI sequences may display garbage. We know cool-retro-term and emacs' ansi-term are affected,
-  most mainstream terminals are not.
-- :kbd:`alt-left` and :kbd:`alt-right` will now move by one argument (which may contain quoted spaces), not just one word like :kbd:`ctrl-left` and :kbd:`ctrl-right` do.
-- :kbd:`alt-backspace` will delete an entire argument, not just one word. The old word behavior has been moved to :kbd:`ctrl-backspace`. If your terminal doesn't support `ctrl-backspace`, consider using :kbd:`ctrl-w`, or :kbd:`alt-b` + :kbd:`alt-d`.
+- :kbd:`ctrl-c` now calls a new bind function called ``clear-commandline``. The old behavior, which leaves a "^C" marker, is available as ``cancel-commandline`` (:issue:`10935`)
 - ``random`` will produce different values from previous versions of fish when used with the same seed, and will work more sensibly with small seed numbers.
   The seed was never guaranteed to give the same result across systems,
   so we do not expect this to have a large impact (:issue:`9593`).
@@ -68,8 +75,9 @@ Notable backwards-incompatible changes
     set -Ua fish_features no-qmark-noglob
 
   The flag will eventually be made read-only, making it impossible to turn off.
+- Terminals that fail to ignore unrecognized OSC or CSI sequences may display garbage. We know cool-retro-term and emacs' ansi-term are affected, but most mainstream terminals are not.
 - fish no longer searches directories from the Windows system/user ``$PATH`` environment variable for Linux executables. To execute Linux binaries by name (i.e. not with a relative or absolute path) from a Windows folder, make sure the ``/mnt/c/...`` path is explicitly added to ``$fish_user_paths`` and not just automatically appended to ``$PATH`` by ``wsl.exe`` (:issue:`10506`).
-- Under Microsoft Windows Subsystem for Linux 1 (not WSL 2) , backgrounded jobs that have not been disowned and do not terminate on their own after a ``SIGHUP`` + ``SIGCONT`` sequence will be explicitly killed by fish on exit (after the usual prompt to close or disown them) to work around a WSL 1 deficiency that sees backgrounded processes that run into ``SIGTTOU`` remain in a suspended state indefinitely (:issue:`5263`). The workaround is to explicitly ``disown`` processes you wish to outlive the shell session.
+- Under Microsoft Windows Subsystem for Linux 1 (not WSL 2), backgrounded jobs that have not been disowned and do not terminate on their own after a ``SIGHUP`` + ``SIGCONT`` sequence will be explicitly killed by fish on exit (after the usual prompt to close or disown them) to work around a WSL 1 deficiency that sees backgrounded processes that run into ``SIGTTOU`` remain in a suspended state indefinitely (:issue:`5263`). The workaround is to explicitly ``disown`` processes you wish to outlive the shell session.
 
 Notable improvements and fixes
 ------------------------------
@@ -86,23 +94,30 @@ Notable improvements and fixes
    - ``bind ctrl-x,alt-c 'do something'`` binds a sequence of two keys.
 
    Any key argument that starts with an ASCII control character (like ``\e`` or ``\cX``) or is up to 3 characters long, not a named key, and does not contain ``,`` or ``-`` will be interpreted in the old syntax to keep compatibility for the majority of bindings.
+
+   Keyboard protocols can be turned off by disabling the "keyboard-protocols" feature flag::
+
+     set -Ua fish_features no-keyboard-protocols
+
+   This is a temporary measure to work around buggy terminals (:issue:`11056`), which appear to be relatively rare.
+   Use this if something like "=0" or "=5u" appears in your commandline mysteriously.
+
 - fish can now be built as a self-installing binary (:issue:`10367`). That means it can be easily built on one system and copied to another, where it can extract supporting files.
   To do this, run::
 
     cargo install --path . # in a clone of the fish repository
     # or `cargo build --release` and copy target/release/fish{,_indent,_key_reader} wherever you want
 
-  The first time it runs interactively, it will extract all the data files to  ``~/.local/share/fish/install/``. To uninstall, remove the fish binaries and that directory.
+  The first time it runs interactively, it will extract all the data files to  ``~/.local/share/fish/install/``. A specific path can be used for the data files with ``fish --install=PATH`` To uninstall, remove the fish binaries and that directory.
 
   This build system is experimental; the main build system, using ``cmake``, remains the recommended approach for packaging and installation to a prefix.
 - A new function ``fish_should_add_to_history`` can be overridden to decide whether a command should be added to the history (:issue:`10302`).
-- :kbd:`ctrl-c` during command input no longer prints ``^C`` and a new prompt, but merely clears the command line. This restores the behavior from version 2.2. To revert to the old behavior, use ``for mode in (bind --list-modes); bind -M $mode ctrl-c cancel-commandline-traditional; end`` (:issue:`10213`).
 - Bindings can now mix special input functions and shell commands, so ``bind ctrl-g expand-abbr "commandline -i \n"`` works as expected (:issue:`8186`).
-- Special input functions run from bindings via ``commandline -f`` are now applied immediately, instead of after the currently executing binding (:issue:`3031`).
+- Special input functions run from bindings via ``commandline -f`` are now applied immediately, instead of after the currently executing binding (:issue:`3031`, :issue:`10126`).
   For example, ``commandline -i foo; commandline | grep foo`` succeeds now.
 - Undo history is no longer truncated after every command, but kept for the lifetime of the shell process.
 - The :kbd:`ctrl-r` history search now uses glob syntax (:issue:`10131`).
-- The :kbd:`ctrl-r` history search now operates only on the line or command substitution at cursor, making it easier to combine commands from history.
+- The :kbd:`ctrl-r` history search now operates only on the line or command substitution at cursor, making it easier to combine commands from history (:issue:`9751`).
 - Abbreviations can now be restricted to specific commands. For instance::
 
     abbr --add --command git back 'reset --hard HEAD^'
@@ -132,6 +147,7 @@ Deprecations and removed features
   If this happens, you can use the ``reset`` command from ``ncurses`` to restore the terminal state.
 - ``fish_key_reader --verbose`` no longer shows timing information.
 - Terminal information is no longer read from hashed terminfo databases, or termcap databases (:issue:`10269`). The vast majority of systems use a non-hashed terminfo database, which is still supported.
+- ``source`` returns an error if used without a filename or pipe/redirection (:issue:`10774`).
 
 Scripting improvements
 ----------------------
@@ -158,6 +174,8 @@ Scripting improvements
 - A new ``path basename -E`` option that causes it to return the basename ("filename" with the directory prefix removed) with the final extension (if any) also removed. This is a shorter version of ``path change-extension "" (path basename $foo)`` (:issue:`10521`).
 - A new ``math --scale-mode`` option to select ``truncate``, ``round``, ``floor``, ``ceiling`` as you wish; the default value is ``truncate``. (:issue:`9117`).
 - ``random`` is now less strict about its arguments, allowing a start larger or equal to the end. (:issue:`10879`)
+- ``function --argument-names`` now produces an error if a read-only variable name is used, rather than simply ignoring it (:issue:`10842`).
+- Tilde expansion in braces (that is, ``{~,}``) works correctly (:issue:`10610`).
 
 Interactive improvements
 ------------------------
@@ -177,11 +195,20 @@ Interactive improvements
 - Measuring a command with ``time`` now considers the time taken for command substitution (:issue:`9100`).
 - ``fish_add_path`` now automatically enables verbose mode when used interactively (in the command line), in an effort to be clearer about what it does (:issue:`10532`).
 - fish no longer adopts TTY modes of failed commands (:issue:`10603`).
-- `complete -e cmd` now prevents autoloading completions for `cmd` (:issue:`6716`).
+- ``complete -e cmd`` now prevents autoloading completions for ``cmd`` (:issue:`6716`).
 - fish's default color scheme no longer uses the color "blue", as it has bad contrast against the background in a few terminal's default palettes (:issue:`10758`, :issue:`10786`)
   The color scheme will not be upgraded for existing installs. If you want, you should select it again via ``fish_config``.
 - Command lines which are larger than the terminal are now displayed correctly, instead of multiple blank lines being displayed (:issue:`7296`).
 - Prompts that use external commands will no longer produce an infinite loop if the command crashes (:issue:`9796`).
+- Undo (:kbd:`ctrl-z`) restores the cursor position too (:issue:`10838`).
+- The output of ``jobs`` shows "-" for jobs that have the same process group ID as the fish process, rather than "-2" (:issue:`10833`).
+- Job expansion (``%1`` syntax) works properly for jobs that are a mixture of external commands and functions (:issue:`10832`).
+- Command lines which have more lines than the terminal can be displayed and edited correctly (:issue:`10827`).
+- Functions that have been erased are no longer highlighted as valid commands (:issue:`10866`).
+- ``not``, ``time``, and variable assignments (that is ``not time a=b env``) is correctly recognized as valid syntax (:issue:`10890`).
+- The Web-based configuration removes old right-hand-side prompts again, fixing a regression in fish 3.4.0 (:issue:`10675`).
+- Further protection against programs which crash and leave the terminal in an inconsistent state (:issue:`10834`, :issue:`11038`).
+- A workaround for git being very slow on macOS has been applied, improving performance after a fresh boot (:issue:`10535`).
 
 New or improved bindings
 ^^^^^^^^^^^^^^^^^^^^^^^^
@@ -189,8 +216,8 @@ New or improved bindings
 - During up-arrow history search, :kbd:`shift-delete` will delete the current search item and move to the next older item. Previously this was only supported in the history pager. 
 - :kbd:`shift-delete` will also remove the currently-displayed autosuggestion from history, and remove it as a suggestion.
 - :kbd:`ctrl-Z` (also known as :kbd:`ctrl-shift-z`) is now bound to redo.
-- :kbd:`alt-delete` now deletes the argument (which may contain quoted spaces) right of the cursor.
 - Some improvements to the :kbd:`alt-e` binding which edits the command line in an external editor:
+
   - The editor's cursor position is copied back to fish. This is currently supported for Vim and Kakoune.
   - Cursor position synchronization is only supported for a set of known editors, which are now also detected in aliases which use ``complete --wraps``. For example, use ``complete --wraps my-vim vim`` to synchronize cursors when ``EDITOR=my-vim``.
   - Multiline commands are indented before being sent to the editor, which matches how they are displayed in fish.
@@ -199,23 +226,30 @@ New or improved bindings
 - :kbd:`alt-d` on an empty command line lists the directory history again. This restores the behavior of version 2.1.
 - ``history-prefix-search-backward`` and ``-forward`` now maintain the cursor position, instead of moving the cursor to the end of the command line (:issue:`10430`).
 - The following keys have refined behavior if the terminal supports :ref:`the new keyboard encodings <changelog-new-bindings>`:
+
   - :kbd:`shift-enter` now inserts a newline instead of executing the command line.
   - :kbd:`ctrl-backspace` now deletes the last word instead of only one character (:issue:`10741`).
   - :kbd:`ctrl-delete` deletes the next word (same as :kbd:`alt-d`).
 - New special input functions:
+
   - ``forward-char-passive`` and ``backward-char-passive`` are like their non-passive variants but do not accept autosuggestions or move focus in the completion pager (:issue:`10398`).
-  - ``forward-token``, ``backward-token``, ``kill-token``, and ``backward-kill-token`` are similar to the ``*-bigword`` variants but for the whole argument token which includes escaped spaces (:issue:`2014`).
+  - ``forward-token``, ``backward-token``, ``kill-token``, and ``backward-kill-token`` are similar to the ``*-bigword`` variants but for the whole argument token (which includes escaped spaces) (:issue:`2014`).
+  - ``clear-commandline``, which merely clears the command line, as an alternative to ``cancel-commandline`` which prints ``^C`` and a new prompt (:issue:`10213`).
 - The ``accept-autosuggestion`` special input function now returns false when there was nothing to accept (:issue:`10608`).
 - Vi mode has seen some improvements but continues to suffer from the lack of people working on it.
+
   - New default cursor shapes for insert and replace mode.
-  - Insert-mode :kbd:`ctrl-n` accepts autosuggestions (:issue:`10339`).
+  - :kbd:`ctrl-n` in insert mode accepts autosuggestions (:issue:`10339`).
   - Outside insert mode, the cursor will no longer be placed beyond the last character on the commandline.
   - When the cursor is at the end of the commandline, a single :kbd:`l` will accept an autosuggestion (:issue:`10286`).
   - The cursor position after pasting (:kbd:`p`) has been corrected.
+  - Added an additional binding, :kbd:`_`, for moving to the beginning of the line (:issue:`10720`).
   - When the cursor is at the start of a line, escaping from insert mode no longer moves the cursor to the previous line.
   - Added bindings for clipboard interaction, like :kbd:`",+,p` and :kbd:`",+,y,y`.
   - Deleting in visual mode now moves the cursor back, matching vi (:issue:`10394`).
+  - The :kbd:`;`, :kbd:`,`, :kbd:`v`, :kbd:`V`, :kbd:`I`, and :kbd:`gU` bindings work in visual mode (:issue:`10601`, :issue:`10648`).
   - Support :kbd:`%` motion (:issue:`10593`).
+  - :kbd:`ctrl-k` to remove the contents of the line beyond the cursor in all modes (:issue:`10648`).
   - Support `ab` and `ib` vi text objects. New input functions are introduced ``jump-{to,till}-matching-bracket`` (:issue:`1842`).
   - The :kbd:`E` binding now correctly handles the last character of the word, by jumping to the next word (:issue:`9700`).
 
@@ -225,13 +259,16 @@ Completions
 - Option completion now uses fuzzy subsequence filtering, just like non-option completion (:issue:`830`).
   This means that ``--fb`` may be completed to ``--foobar`` if there is no better match.
 - Completions that insert an entire token now use quotes instead of backslashes to escape special characters (:issue:`5433`).
-- Historically, file name completions are provided after the last ``:``  or ``=`` within a token.
+- Normally, file name completions start after the last ``:``  or ``=`` in a token.
   This helps commands like ``rsync --files-from=``.
-  If the ``=`` or ``:`` is actually part of the filename, it will be escaped as ``\:`` and ``\=``,
-  and no longer get this special treatment.
+  This special meaning can now disabled by escaping these separators as ``\:`` and ``\=``.
   This matches Bash's behavior.
+  Note that this escaping is usually not necessary since the completion engine already tries
+  to guess whether the separator is actually part of a file name.
 - Various new completion scripts and numerous updates to existing ones.
+- Completions could hang if the ``PAGER`` environment variable was sent to certain editors on macOS, FreeBSD and some other platforms. This has been fixed (:issue:`10820`).
 - Generated completions are now stored in ``$XDG_CACHE_HOME/fish`` or ``~/.cache/fish`` by default (:issue:`10369`)
+- A regression in fish 3.1, where completing a command line could change it completely, has been fixed (:issue:`10904`).
 
 Improved terminal support
 ^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -247,10 +284,14 @@ Improved terminal support
 
 Other improvements
 ------------------
+- ``status`` gained a ``buildinfo`` subcommand, to print information on how fish was built, to help with debugging (:issue:`10896`).
 - ``fish_indent`` will now collapse multiple empty lines into one (:issue:`10325`).
 - ``fish_indent`` now preserves the modification time of files if there were no changes (:issue:`10624`).
+- Performance in launching external processes has been improved for many cases (:issue:`10869`).
 - Performance and interactivity under Windows Subsystem for Linux has been improved, with a workaround for Windows-specific locations being appended to ``$PATH`` by default (:issue:`10506`).
+- On macOS, paths from ``/etc/paths`` and ``/etc/manpaths`` containing colons are handled correctly (:issue:`10684`).
 - Additional filesystems such as AFS are properly detected as remote, which avoids certain hangs due to expensive filesystem locks (:issue:`10818`).
+- A spurious error when launching multiple instances of fish for the first time has been removed (:issue:`10813`).
 
 .. _rust-packaging:
 
@@ -259,9 +300,22 @@ For distributors
 
 fish has been ported to Rust. This means a significant change in dependencies, which are listed in the README. In short, Rust 1.70 or greater is required, and a C++ compiler is no longer needed (although a C compiler is still required, for some C glue code and the tests).
 
-CMake remains the recommended build system, because of cargo's limited support for installing support files. Version 3.5 remains the minimum supported version. The Xcode generator for CMake is not supported any longer (:issue:`9924`)
+CMake remains the recommended build system, because of cargo's limited support for installing support files. Version 3.5 remains the minimum supported version. The Xcode generator for CMake is not supported any longer (:issue:`9924`). CMake builds default to optimized release builds (:issue:`10799`).
 
 fish no longer depends on the ncurses library, but still uses a terminfo database. When packaging fish, please add a dependency on the package containing your terminfo database instead of curses.
+
+The ``test`` target was removed as it can no longer be defined in new CMake versions. Use ``make fish_run_tests``. Any existing test target will not print output if it fails (:issue:`11116`).
+
+The Web-based configuration has been rewritten to use Alpine.js (:issue:`9554`).
+
+--------------
+
+fish 4.0b1 (released December 17, 2024)
+=======================================
+
+A number of improvements were included in fish 4.0.0 following the beta release of 4.0b1. These include fixes for regressions, improvements to completions and documentation, and the removal of a small number of problematic changes.
+
+The full list of fixed issues can be found on the `GitHub milestone page for 4.0-final <https://github.com/fish-shell/fish-shell/milestone/43>`_.
 
 --------------
 
@@ -521,7 +575,7 @@ fish 3.6.0 (released January 7, 2023)
 Notable improvements and fixes
 ------------------------------
 - By default, :kbd:`ctrl-r` now opens the command history in the pager (:issue:`602`). This is fully searchable and syntax-highlighted, as an alternative to the incremental search seen in other shells. The new special input function ``history-pager`` has been added for custom bindings.
-- Abbrevations are more flexible (:issue:`9313`, :issue:`5003`, :issue:`2287`):
+- Abbreviations are more flexible (:issue:`9313`, :issue:`5003`, :issue:`2287`):
 
   - They may optionally replace tokens anywhere on the command line, instead of only commands
   - Matching tokens may be described using a regular expression instead of a literal word
@@ -617,7 +671,7 @@ Interactive improvements
 - A new variable, :envvar:`fish_cursor_selection_mode`, can be used to configure whether the command line selection includes the character under the cursor (``inclusive``) or not (``exclusive``). The new default is ``exclusive``; use ``set fish_cursor_selection_mode inclusive`` to get the previous behavior back (:issue:`7762`).
 - fish's completion pager now fills half the terminal on first tab press instead of only 4 rows, which should make results visible more often and save key presses, without constantly snapping fish to the top of the terminal (:issue:`9105`, :issue:`2698`).
 - The ``complete-and-search`` binding, used with :kbd:`shift-tab` by default, selects the first item in the results immediately (:issue:`9080`).
-- ``bind`` output is now syntax-highlighted when used interacively.
+- ``bind`` output is now syntax-highlighted when used interactively.
 - :kbd:`alt-h` (the default ``__fish_man_page`` binding) does a better job of showing the manual page of the command under cursor (:issue:`9020`).
 - If :envvar:`fish_color_valid_path` contains an actual color instead of just modifiers, those will be used for valid paths even if the underlying color isn't "normal" (:issue:`9159`).
 - The key combination for the QUIT terminal sequence, often :kbd:`ctrl-\\` (``\x1c``), can now be used as a binding (:issue:`9234`).
@@ -846,7 +900,7 @@ Interactive improvements
 New or improved bindings
 ^^^^^^^^^^^^^^^^^^^^^^^^
 - The :kbd:`alt-s` binding will now insert ``doas`` instead of ``sudo`` if necessary (:issue:`8942`).
-- The ``kill-whole-line`` special input function now kills the newline preceeding the last line. This makes ``dd`` in vi-mode clear the last line properly.
+- The ``kill-whole-line`` special input function now kills the newline preceding the last line. This makes ``dd`` in vi-mode clear the last line properly.
 - The new ``kill-inner-line`` special input function kills the line without any newlines, allowing ``cc`` in vi-mode to clear the line while preserving newlines (:issue:`8983`).
 - On terminals that emit special sequences for these combinations, :kbd:`shift-space` is bound like :kbd:`space`, and :kbd:`ctrl-enter` is bound like :kbd:`return` (:issue:`8874`).
 
@@ -955,7 +1009,7 @@ Deprecations and removed features
     > set -Ua fish_features ampersand-nobg-in-token
 
 - ``$status`` is now forbidden as a command, to prevent a surprisingly common error among new users: Running ``if $status`` (:issue:`8171`). This applies *only* to ``$status``, other variables are still allowed.
-- ``set --query`` now returns an exit status of 255 if given no variable names. This means ``if set -q $foo`` will not enter the if-block if ``$foo`` is empty or unset. To restore the previous behavior, use ``if not set -q foo; or set -q $foo`` - but this is unlikely to be desireable (:issue:`8214`).
+- ``set --query`` now returns an exit status of 255 if given no variable names. This means ``if set -q $foo`` will not enter the if-block if ``$foo`` is empty or unset. To restore the previous behavior, use ``if not set -q foo; or set -q $foo`` - but this is unlikely to be desirable (:issue:`8214`).
 - ``_`` is now a reserved keyword (:issue:`8342`).
 - The special input functions ``delete-or-exit``, ``nextd-or-forward-word`` and ``prevd-or-backward-word`` replace fish functions of the same names (:issue:`8538`).
 - Mac OS X 10.9 is no longer supported. The minimum Mac version is now 10.10 "Yosemite."
@@ -978,7 +1032,7 @@ Scripting improvements
 - ``commandline`` gained a ``--paging-full-mode`` option to check if the pager is showing all the possible lines (no "7 more rows" message) (:issue:`8485`).
 - List expansion correctly reports an error when used with all zero indexes (:issue:`8213`).
 - Running ``fish`` with a directory instead of a script as argument (eg ``fish .``) no longer leads to an infinite loop. Instead it errors out immediately (:issue:`8258`)
-- Some error messages occuring after fork, like "text file busy" have been replaced by bespoke error messages for fish (like "File is currently open for writing"). This also restores error messages with current glibc versions that removed sys_errlist (:issue:`8234`, :issue:`4183`).
+- Some error messages occurring after fork, like "text file busy" have been replaced by bespoke error messages for fish (like "File is currently open for writing"). This also restores error messages with current glibc versions that removed sys_errlist (:issue:`8234`, :issue:`4183`).
 - The ``realpath`` builtin now also squashes leading slashes with the ``--no-symlinks`` option (:issue:`8281`).
 - When trying to ``cd`` to a dangling (broken) symbolic link, fish will print an error noting that the target is a broken link (:issue:`8264`).
 - On MacOS terminals that are not granted permissions to access a folder, ``cd`` would print a spurious "rotten symlink" error, which has been corrected to "permission denied" (:issue:`8264`).
@@ -1484,7 +1538,7 @@ Interactive improvements
 -  :kbd:`ctrl-c` handling has been reimplemented in C++ and is therefore quicker (:issue:`5259`), no longer occasionally prints an "unknown command" error (:issue:`7145`) or overwrites multiline prompts (:issue:`3537`).
 -  :kbd:`ctrl-c` no longer kills background jobs for which job control is
    disabled, matching POSIX semantics (:issue:`6828`, :issue:`6861`).
--  Autosuggestions work properly after :kbd:`ctrl-c` cancels the current commmand line (:issue:`6937`).
+-  Autosuggestions work properly after :kbd:`ctrl-c` cancels the current command line (:issue:`6937`).
 -  History search is now case-insensitive unless the search string contains an uppercase character (:issue:`7273`).
 -  ``fish_update_completions`` gained a new ``--keep`` option, which improves speed by skipping completions that already exist (:issue:`6775`, :issue:`6796`).
 -  Aliases containing an embedded backslash appear properly in the output of ``alias`` (:issue:`6910`).
@@ -2038,7 +2092,7 @@ Interactive improvements
    argument.
 -  Syntax highlighting works correctly with variables as commands
    (:issue:`5658`) and redirections to close file descriptors (:issue:`6092`).
--  ``help`` works properly on Windows Subsytem for Linux (:issue:`5759`, :issue:`6338`).
+-  ``help`` works properly on Windows Subsystem for Linux (:issue:`5759`, :issue:`6338`).
 -  A bug where ``disown`` could crash the shell has been fixed (:issue:`5720`).
 -  fish will not autosuggest files ending with ``~`` unless there are no
    other candidates, as these are generally backup files (:issue:`985`).
@@ -2980,7 +3034,7 @@ Other significant changes
 -  Some systems’ ``su`` implementations do not set the ``USER``
    environment variable; it is now reset for root users (:issue:`3916`).
 -  Under terminals which support it, bracketed paste is enabled,
-   escaping problematic characters for security and convience (:issue:`3871`).
+   escaping problematic characters for security and convenience (:issue:`3871`).
    Inside single quotes (``'``), single quotes and backslashes in pasted
    text are escaped (:issue:`967`). The ``fish_clipboard_paste`` function (bound
    to ``C-v`` by default) is still the recommended pasting method where
@@ -3109,9 +3163,9 @@ Other significant changes
 -  fish no longer prints a warning when it identifies a running instance
    of an old version (2.1.0 and earlier). Changes to universal variables
    may not propagate between these old versions and 2.5b1.
--  Improved compatiblity with Android (:issue:`3585`), MSYS/mingw (:issue:`2360`), and
+-  Improved compatibility with Android (:issue:`3585`), MSYS/mingw (:issue:`2360`), and
    Solaris (:issue:`3456`, :issue:`3340`).
--  Like other shells, the ``test`` builting now returns an error for
+-  Like other shells, the ``test`` built-in now returns an error for
    numeric operations on invalid integers (:issue:`3346`, :issue:`3581`).
 -  ``complete`` no longer recognises ``--authoritative`` and
    ``--unauthoritative`` options, and they are marked as obsolete.

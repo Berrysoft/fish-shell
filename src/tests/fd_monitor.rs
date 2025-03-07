@@ -13,7 +13,7 @@ use std::time::Duration;
 use errno::errno;
 
 use crate::fd_monitor::{FdEventSignaller, FdMonitor};
-use crate::fd_readable_set::FdReadableSet;
+use crate::fd_readable_set::{FdReadableSet, Timeout};
 use crate::fds::{make_autoclose_pipes, AutoCloseFd, AutoClosePipes};
 use crate::tests::prelude::*;
 
@@ -159,6 +159,7 @@ fn test_fd_event_signaller() {
 // and then invokes the `bad_action` function on the file descriptor while the poll/select is
 // waiting. The function returns Result<i32, i32>: either the number of readable file descriptors
 // or the error code from poll/select.
+#[cfg(test)]
 fn do_something_bad_during_select<F>(bad_action: F) -> Result<i32, i32>
 where
     F: FnOnce(OwnedFd) -> Option<OwnedFd>,
@@ -181,8 +182,8 @@ where
 
         // Timeout after 500 msec.
         // macOS will eagerly return EBADF if the fd is closed; Linux will hit the timeout.
-        let timeout_usec = 500 * 1_000;
-        let ret = fd_set.check_readable(timeout_usec);
+        let timeout = Timeout::Duration(Duration::from_millis(500));
+        let ret = fd_set.check_readable(timeout);
         if ret < 0 {
             Err(errno().0)
         } else {
@@ -203,13 +204,18 @@ where
 
 #[test]
 fn test_close_during_select_ebadf() {
+    use crate::common::{is_windows_subsystem_for_linux as is_wsl, WSL};
     let close_it = |read_fd: OwnedFd| {
         drop(read_fd);
         None
     };
     let result = do_something_bad_during_select(close_it);
+
+    // WSLv1 does not error out with EBADF if the fd is closed mid-select.
+    // This is OK because we do not _depend_ on this behavior; the only
+    // true requirement is that we don't panic in the handling code above.
     assert!(
-        matches!(result, Err(libc::EBADF) | Ok(1)),
+        is_wsl(WSL::V1) || matches!(result, Err(libc::EBADF) | Ok(1)),
         "select/poll should have failed with EBADF or marked readable"
     );
 }

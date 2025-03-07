@@ -6,6 +6,7 @@ use crate::future_feature_flags::{self as features, feature_test};
 use crate::proc::{
     get_job_control_mode, get_login, is_interactive_session, set_job_control_mode, JobControl,
 };
+use crate::reader::reader_in_interactive_read;
 use crate::wutil::{waccess, wbasename, wdirname, wrealpath, Error};
 use libc::F_OK;
 use nix::errno::Errno;
@@ -50,6 +51,7 @@ enum StatusCmd {
     STATUS_IS_FULL_JOB_CTRL,
     STATUS_IS_INTERACTIVE,
     STATUS_IS_INTERACTIVE_JOB_CTRL,
+    STATUS_IS_INTERACTIVE_READ,
     STATUS_IS_LOGIN,
     STATUS_IS_NO_JOB_CTRL,
     STATUS_LINE_NUMBER,
@@ -82,6 +84,7 @@ str_enum!(
     (STATUS_IS_FULL_JOB_CTRL, "is-full-job-control"),
     (STATUS_IS_INTERACTIVE, "is-interactive"),
     (STATUS_IS_INTERACTIVE_JOB_CTRL, "is-interactive-job-control"),
+    (STATUS_IS_INTERACTIVE_READ, "is-interactive-read"),
     (STATUS_IS_LOGIN, "is-login"),
     (STATUS_IS_NO_JOB_CTRL, "is-no-job-control"),
     (STATUS_SET_JOB_CONTROL, "job-control"),
@@ -141,6 +144,7 @@ const FISH_PATH_SHORT: char = '\x01';
 const IS_FULL_JOB_CTRL_SHORT: char = '\x02';
 const IS_INTERACTIVE_JOB_CTRL_SHORT: char = '\x03';
 const IS_NO_JOB_CTRL_SHORT: char = '\x04';
+const IS_INTERACTIVE_READ_SHORT: char = '\x05';
 
 const SHORT_OPTIONS: &wstr = L!(":L:cbilfnhj:t");
 const LONG_OPTIONS: &[WOption] = &[
@@ -161,6 +165,11 @@ const LONG_OPTIONS: &[WOption] = &[
         L!("is-interactive-job-control"),
         NoArgument,
         IS_INTERACTIVE_JOB_CTRL_SHORT,
+    ),
+    wopt(
+        L!("is-interactive-read"),
+        NoArgument,
+        IS_INTERACTIVE_READ_SHORT,
     ),
     wopt(L!("is-login"), NoArgument, 'l'),
     wopt(L!("is-no-job-control"), NoArgument, IS_NO_JOB_CTRL_SHORT),
@@ -268,6 +277,11 @@ fn parse_cmd_opts(
             }
             IS_INTERACTIVE_JOB_CTRL_SHORT => {
                 if !opts.try_set_status_cmd(STATUS_IS_INTERACTIVE_JOB_CTRL, streams) {
+                    return STATUS_CMD_ERROR;
+                }
+            }
+            IS_INTERACTIVE_READ_SHORT => {
+                if !opts.try_set_status_cmd(STATUS_IS_INTERACTIVE_READ, streams) {
                     return STATUS_CMD_ERROR;
                 }
             }
@@ -422,45 +436,6 @@ pub fn status(parser: &Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> O
             }
             return retval;
         }
-        STATUS_BUILDINFO => {
-            let version = str2wcstring(crate::BUILD_VERSION.as_bytes());
-            let target = str2wcstring(env!("BUILD_TARGET_TRIPLE").as_bytes());
-            let host = str2wcstring(env!("BUILD_HOST_TRIPLE").as_bytes());
-            let profile = str2wcstring(env!("BUILD_PROFILE").as_bytes());
-            streams.out.append(L!("Build system: "));
-            let buildsystem = match option_env!("CMAKE") {
-                Some("1") => "CMake",
-                _ => "Cargo",
-            };
-            streams.out.appendln(str2wcstring(buildsystem.as_bytes()));
-            streams.out.append(L!("Version: "));
-            streams.out.appendln(version);
-            if target == host {
-                streams.out.append(L!("Target (and host): "));
-                streams.out.appendln(target);
-            } else {
-                streams.out.append(L!("Target: "));
-                streams.out.appendln(target);
-                streams.out.append(L!("Host: "));
-                streams.out.appendln(host);
-            }
-            streams.out.append(L!("Profile: "));
-            streams.out.appendln(profile);
-            streams.out.append(L!("Features: "));
-            let features: &[&str] = &[
-                #[cfg(gettext)]
-                "gettext",
-                #[cfg(feature = "installable")]
-                "installable",
-                #[cfg(target_feature = "crt-static")]
-                "crt-static",
-            ];
-            streams
-                .out
-                .appendln(str2wcstring(features.join(" ").as_bytes()));
-            streams.out.appendln("");
-            return STATUS_CMD_OK;
-        }
         ref s => {
             if !args.is_empty() {
                 streams.err.append(wgettext_fmt!(
@@ -473,6 +448,45 @@ pub fn status(parser: &Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> O
                 return STATUS_INVALID_ARGS;
             }
             match s {
+                STATUS_BUILDINFO => {
+                    let version = str2wcstring(crate::BUILD_VERSION.as_bytes());
+                    let target = str2wcstring(env!("BUILD_TARGET_TRIPLE").as_bytes());
+                    let host = str2wcstring(env!("BUILD_HOST_TRIPLE").as_bytes());
+                    let profile = str2wcstring(env!("BUILD_PROFILE").as_bytes());
+                    streams.out.append(L!("Build system: "));
+                    let buildsystem = match option_env!("CMAKE") {
+                        Some("1") => "CMake",
+                        _ => "Cargo",
+                    };
+                    streams.out.appendln(str2wcstring(buildsystem.as_bytes()));
+                    streams.out.append(L!("Version: "));
+                    streams.out.appendln(version);
+                    if target == host {
+                        streams.out.append(L!("Target (and host): "));
+                        streams.out.appendln(target);
+                    } else {
+                        streams.out.append(L!("Target: "));
+                        streams.out.appendln(target);
+                        streams.out.append(L!("Host: "));
+                        streams.out.appendln(host);
+                    }
+                    streams.out.append(L!("Profile: "));
+                    streams.out.appendln(profile);
+                    streams.out.append(L!("Features: "));
+                    let features: &[&str] = &[
+                        #[cfg(gettext)]
+                        "gettext",
+                        #[cfg(feature = "installable")]
+                        "installable",
+                        #[cfg(target_feature = "crt-static")]
+                        "crt-static",
+                    ];
+                    streams
+                        .out
+                        .appendln(str2wcstring(features.join(" ").as_bytes()));
+                    streams.out.appendln("");
+                    return STATUS_CMD_OK;
+                }
                 STATUS_BASENAME | STATUS_DIRNAME | STATUS_FILENAME => {
                     let res = parser.current_filename();
                     let function = res.unwrap_or_default();
@@ -548,6 +562,13 @@ pub fn status(parser: &Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> O
                         return STATUS_CMD_ERROR;
                     }
                 }
+                STATUS_IS_INTERACTIVE_READ => {
+                    if reader_in_interactive_read() {
+                        return STATUS_CMD_OK;
+                    } else {
+                        return STATUS_CMD_ERROR;
+                    }
+                }
                 STATUS_IS_NO_JOB_CTRL => {
                     if get_job_control_mode() == JobControl::none {
                         return STATUS_CMD_OK;
@@ -583,7 +604,7 @@ pub fn status(parser: &Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> O
                     }
                     if path.is_absolute() {
                         let path = str2wcstring(path.as_os_str().as_bytes());
-                        // This is an absoulte path, we can canonicalize it
+                        // This is an absolute path, we can canonicalize it
                         let real = match wrealpath(&path) {
                             Some(p) if waccess(&p, F_OK) == 0 => p,
                             // realpath did not work, just append the path
@@ -599,10 +620,7 @@ pub fn status(parser: &Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> O
                         streams.out.appendln(path);
                     }
                 }
-                STATUS_BUILDINFO
-                | STATUS_SET_JOB_CONTROL
-                | STATUS_FEATURES
-                | STATUS_TEST_FEATURE => {
+                STATUS_SET_JOB_CONTROL | STATUS_FEATURES | STATUS_TEST_FEATURE => {
                     unreachable!("")
                 }
             }

@@ -43,14 +43,14 @@ Guidelines
 In short:
 
 - Be conservative in what you need (keep to the agreed minimum supported Rust version, limit new dependencies)
-- Use automated tools to help you (including ``make test`` and ``build_tools/style.fish``)
+- Use automated tools to help you (including ``make fish_run_tests`` and ``build_tools/style.fish``)
 
 Contributing completions
 ========================
 
 Completion scripts are the most common contribution to fish, and they are very welcome.
 
-In general, we'll take all well-written completion scripts for a command that is publically available.
+In general, we'll take all well-written completion scripts for a command that is publicly available.
 This means no private tools or personal scripts, and we do reserve the right to reject for other reasons.
 
 Before you try to contribute them to fish, consider if the authors of the tool you are completing want to maintain the script instead.
@@ -198,9 +198,10 @@ The tests can be found in three places:
 When in doubt, the bulk of the tests should be added as a littlecheck test in tests/checks, as they are the easiest to modify and run, and much faster and more dependable than pexpect tests. The syntax is fairly self-explanatory. It's a fish script with the expected output in ``# CHECK:`` or ``# CHECKERR:`` (for stderr) comments.
 If your littlecheck test has a specific dependency, use ``# REQUIRE: ...`` with a posix sh script.
 
-Tests are run in a temporary $HOME, but that is shared among the tests by default. If you need a temporary directory for your test, you should create one (e.g. with ``mktemp``).
-
 The pexpects are written in python and can simulate input and output to/from a terminal, so they are needed for anything that needs actual interactivity. The runner is in tests/pexpect_helper.py, in case you need to modify something there.
+
+These tests can be run via the tests/test_driver.py python script, which will set up the environment.
+It sets up a temporary $HOME and also uses it as the current directory, so you do not need to create a temporary directory in them.
 
 If you need a command to do something weird to test something, maybe add it to the ``fish_test_helper`` binary (in tests/fish_test_helper.c), or see if it can already do it.
 
@@ -212,16 +213,18 @@ The tests can be run on your local computer on all operating systems.
 ::
 
    cmake path/to/fish-shell
-   make test
+   make fish_run_tests
 
 Or you can run them on a fish, without involving cmake::
 
   cargo build
-  FISHDIR=target/debug tests/test_driver.sh tests/test.fish # script tests, the checks
-  FISHDIR=target/debug tests/test_driver.sh tests/interactive.fish # interactive tests, the pexpects
+  cargo test # for the unit tests
+  tests/test_driver.py --cachedir=/tmp target/debug # for the script and interactive tests
 
-Here, ``FISHDIR`` refers to a directory with ``fish``, ``fish_indent`` and ``fish_key_reader`` in it.
+Here, the first argument to test_driver.py refers to a directory with ``fish``, ``fish_indent`` and ``fish_key_reader`` in it.
 In this example we're in the root of the git repo and have run ``cargo build`` without ``--release``, so it's a debug build.
+The ``--cachedir /tmp`` argument means it will keep the fish_test_helper binary in /tmp instead of recompiling it for every test.
+This saves some time, but isn't strictly necessary.
 
 Git hooks
 ---------
@@ -249,7 +252,7 @@ One possibility is a pre-push hook script like this one:
    done
    if [ "x$isprotected" = x1 ]; then
        echo "Running tests before push to master"
-       make test
+       make fish_run_tests
        RESULT=$?
        if [ $RESULT -ne 0 ]; then
            echo "Tests failed for a push to master, we can't let you do that" >&2
@@ -259,7 +262,7 @@ One possibility is a pre-push hook script like this one:
    exit 0
 
 This will check if the push is to the master branch and, if it is, only
-allow the push if running ``make test`` succeeds. In some circumstances
+allow the push if running ``make fish_run_tests`` succeeds. In some circumstances
 it may be advisable to circumvent this check with
 ``git push --no-verify``, but usually that isn’t necessary.
 

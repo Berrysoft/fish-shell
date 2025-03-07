@@ -39,16 +39,16 @@ endmacro()
 function(_findrust_version_ok ACTUAL_VERSION OUT_IS_OK)
     if(DEFINED Rust_FIND_VERSION_RANGE)
         if(Rust_FIND_VERSION_RANGE_MAX STREQUAL "INCLUDE")
-            set(COMPARSION_OPERATOR "VERSION_LESS_EQUAL")
+            set(COMPARISON_OPERATOR "VERSION_LESS_EQUAL")
         elseif(Rust_FIND_VERSION_RANGE_MAX STREQUAL "EXCLUDE")
-            set(COMPARSION_OPERATOR "VERSION_LESS")
+            set(COMPARISON_OPERATOR "VERSION_LESS")
         else()
             message(FATAL_ERROR "Unexpected value in `<PackageName>_FIND_VERSION_RANGE_MAX`: "
                     "`${Rust_FIND_VERSION_RANGE_MAX}`.")
         endif()
         if(("${ACTUAL_VERSION}" VERSION_GREATER_EQUAL "${Rust_FIND_VERSION_RANGE_MIN}")
                 AND
-            ( "${ACTUAL_VERSION}" ${COMPARSION_OPERATOR} "${Rust_FIND_VERSION_RANGE_MAX}" )
+            ( "${ACTUAL_VERSION}" ${COMPARISON_OPERATOR} "${Rust_FIND_VERSION_RANGE_MAX}" )
         )
             set("${OUT_IS_OK}" TRUE PARENT_SCOPE)
         else()
@@ -306,18 +306,23 @@ if (Rust_RESOLVE_RUSTUP_TOOLCHAINS)
     set(_DISCOVERED_TOOLCHAINS_VERSION "")
 
     foreach(_TOOLCHAIN_RAW ${_TOOLCHAINS_RAW})
-        if (_TOOLCHAIN_RAW MATCHES "([a-zA-Z0-9\\._\\-]+)[ \t\r\n]?(\\(default\\) \\(override\\)|\\(default\\)|\\(override\\))?[ \t\r\n]+(.+)")
+        # We're going to try to parse the output of `rustup toolchain list --verbose`.
+        # We expect output like this:
+        #   stable-random-toolchain-junk (parenthesized-random-stuff-like-active-or-default) /path/to/toolchain/blah/more-blah
+        # In the following regex, we capture the toolchain name, any parenthesized stuff, and then the path.
+        message(STATUS "Parsing toolchain: ${_TOOLCHAIN_RAW}")
+        if (_TOOLCHAIN_RAW MATCHES "([^\t ]+)[\t ]*(\\(.*\\))?[\t ]*(.+)")
             set(_TOOLCHAIN "${CMAKE_MATCH_1}")
             set(_TOOLCHAIN_TYPE "${CMAKE_MATCH_2}")
 
             set(_TOOLCHAIN_PATH "${CMAKE_MATCH_3}")
             set(_TOOLCHAIN_${_TOOLCHAIN}_PATH "${CMAKE_MATCH_3}")
 
-            if (_TOOLCHAIN_TYPE MATCHES ".*\\(default\\).*")
+            if (_TOOLCHAIN_TYPE MATCHES "default")
                 set(_TOOLCHAIN_DEFAULT "${_TOOLCHAIN}")
             endif()
 
-            if (_TOOLCHAIN_TYPE MATCHES ".*\\(override\\).*")
+            if (_TOOLCHAIN_TYPE MATCHES "override")
                 set(_TOOLCHAIN_OVERRIDE "${_TOOLCHAIN}")
             endif()
 

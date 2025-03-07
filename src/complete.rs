@@ -10,8 +10,10 @@ use std::{
 };
 
 use crate::{
-    common::{charptr2wcstring, escape_string, EscapeFlags, EscapeStringStyle},
+    ast::unescape_keyword,
+    common::charptr2wcstring,
     reader::{get_quote, is_backslashed},
+    tokenizer::is_brace_statement,
     util::wcsfilecmp,
     wutil::sprintf,
 };
@@ -72,6 +74,7 @@ static ABBR_DESC: Lazy<&wstr> = Lazy::new(|| wgettext!("Abbreviation: %ls"));
 /// The special cased translation macro for completions. The empty string needs to be special cased,
 /// since it can occur, and should not be translated. (Gettext returns the version information as
 /// the response).
+#[inline(always)]
 #[allow(non_snake_case)]
 fn C_(s: &wstr) -> &'static wstr {
     if s.is_empty() {
@@ -96,7 +99,7 @@ pub const PROG_COMPLETE_SEP: char = '\t';
 
 bitflags! {
     #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-    pub struct CompleteFlags: u8 {
+    pub struct CompleteFlags: u16 {
         /// Do not insert space afterwards if this is the only completion. (The default is to try insert
         /// a space).
         const NO_SPACE = 1 << 0;
@@ -115,6 +118,10 @@ bitflags! {
         const DUPLICATES_ARGUMENT = 1 << 6;
         /// This completes not just a token but replaces an entire line.
         const REPLACES_LINE = 1 << 7;
+        /// If replacing the entire token, keep the "foo=" prefix.
+        const KEEP_VARIABLE_OVERRIDE_PREFIX = 1 << 8;
+        /// This is a variable name.
+        const VARIABLE_NAME = 1 << 9;
     }
 }
 
@@ -660,14 +667,32 @@ impl<'ctx> Completer<'ctx> {
 
         // Get all the arguments.
         let mut tokens = Vec::new();
-        parse_util_process_extent(&cmdline, position_in_statement, Some(&mut tokens));
+        {
+            let proc_range =
+                parse_util_process_extent(&cmdline, position_in_statement, Some(&mut tokens));
+            let start = proc_range.start;
+            if start != 0
+                && cmdline.as_char_slice()[start - 1] == '{'
+                && (start == cmdline.len()
+                    || !is_brace_statement(cmdline.as_char_slice().get(start).copied()))
+            {
+                // We don't want to suggest commands here, since this command line parses as
+                // brace expansion.
+                return;
+            }
+        }
         let actual_token_count = tokens.len();
 
         // Hack: fix autosuggestion by removing prefixing "and"s #6249.
         if is_autosuggest {
             let prefixed_supercommand_count = tokens
                 .iter()
-                .take_while(|token| parser_keywords_is_subcommand(token.get_source(&cmdline)))
+                .take_while(|token| {
+                    parser_keywords_is_subcommand(&unescape_keyword(
+                        token.type_,
+                        token.get_source(&cmdline),
+                    ))
+                })
                 .count();
             tokens.drain(..prefixed_supercommand_count);
         }
@@ -737,19 +762,22 @@ impl<'ctx> Completer<'ctx> {
         if cmd_tok.location_in_or_at_end_of_source_range(cursor_pos) {
             let equals_sign_pos = variable_assignment_equals_pos(current_token);
             if let Some(pos) = equals_sign_pos {
+                let first = self.completions.len();
                 self.complete_param_expand(
-                    &current_token[..pos + 1],
                     &current_token[pos + 1..],
                     /*do_file=*/ true,
                     /*handle_as_special_cd=*/ false,
                     cur_tok.is_unterminated_brace,
                 );
+                for c in &mut self.completions[first..] {
+                    c.flags |= CompleteFlags::KEEP_VARIABLE_OVERRIDE_PREFIX;
+                }
                 return;
             }
             // Complete command filename.
             let current_token = current_token.to_owned();
-            self.complete_cmd(current_token.clone());
-            self.complete_abbr(current_token);
+            self.complete_abbr(current_token.clone());
+            self.complete_cmd(current_token);
             return;
         }
         // See whether we are in an argument, in a redirection or in the whitespace in between.
@@ -842,7 +870,6 @@ impl<'ctx> Completer<'ctx> {
 
         // This function wants the unescaped string.
         self.complete_param_expand(
-            L!(""),
             current_argument,
             do_file,
             handle_as_special_cd,
@@ -1524,7 +1551,6 @@ impl<'ctx> Completer<'ctx> {
     /// Perform generic (not command-specific) expansions on the specified string.
     fn complete_param_expand(
         &mut self,
-        variable_override_prefix: &wstr,
         s: &wstr,
         do_file: bool,
         handle_as_special_cd: bool,
@@ -1565,8 +1591,7 @@ impl<'ctx> Completer<'ctx> {
         // foo=bar => expand the whole thing, and also just bar
         //
         // We also support colon separator (#2178). If there's more than one, prefer the last one.
-        let quoted = get_quote(s, s.len()).is_some();
-        let sep_index = if quoted {
+        let sep_index = if get_quote(s, s.len()).is_some() {
             None
         } else {
             let mut end = s.len();
@@ -1584,50 +1609,15 @@ impl<'ctx> Completer<'ctx> {
         };
         let complete_from_start = sep_index.is_none() || !string_prefixes_string(L!("-"), s);
 
-        if let Some(sep_index) = sep_index {
-            let sep_string = s.slice_from(sep_index + 1);
-            let mut local_completions = Vec::new();
-            if matches!(
-                expand_string(
-                    sep_string.to_owned(),
-                    &mut local_completions,
-                    flags,
-                    self.ctx,
-                    None,
-                )
-                .result,
-                ExpandResultCode::error | ExpandResultCode::overflow
-            ) {
-                FLOGF!(complete, "Error while expanding string '%ls'", sep_string);
-            }
-
-            // Any COMPLETE_REPLACES_TOKEN will also stomp the separator. We need to "repair" them by
-            // inserting our separator and prefix.
-            Self::escape_opening_brackets(&mut local_completions, s);
-            Self::escape_separators(
-                &mut local_completions,
-                variable_override_prefix,
-                self.flags.autosuggestion,
-                true,
-                quoted,
-            );
-            let prefix_with_sep = s.as_char_slice()[..sep_index + 1].into();
-            for comp in &mut local_completions {
-                comp.prepend_token_prefix(prefix_with_sep);
-            }
-            if !self.completions.extend(local_completions) {
-                return;
-            }
-        }
-
+        let first_from_start = self.completions.len();
         if complete_from_start {
+            let mut flags = flags;
             // Don't do fuzzy matching for files if the string begins with a dash (issue #568). We could
             // consider relaxing this if there was a preceding double-dash argument.
             if string_prefixes_string(L!("-"), s) {
                 flags -= ExpandFlags::FUZZY_MATCH;
             }
 
-            let first = self.completions.len();
             if matches!(
                 expand_to_receiver(s.to_owned(), &mut self.completions, flags, self.ctx, None)
                     .result,
@@ -1635,50 +1625,53 @@ impl<'ctx> Completer<'ctx> {
             ) {
                 FLOGF!(complete, "Error while expanding string '%ls'", s);
             }
-            Self::escape_opening_brackets(&mut self.completions[first..], s);
-            let have_token = !s.is_empty();
-            Self::escape_separators(
-                &mut self.completions[first..],
-                variable_override_prefix,
-                self.flags.autosuggestion,
-                have_token,
-                quoted,
-            );
+            Self::escape_opening_brackets(&mut self.completions[first_from_start..], s);
+        }
+
+        let Some(sep_index) = sep_index else {
+            return;
+        };
+
+        // We generally expand both, the whole token ("foo=bar") and also just the "bar"
+        // suffix. If the whole token is a valid path prefix, completions of just the suffix
+        // are probably false positives, and are confusing when I'm using completions to list
+        // directory contents. Apply a wonky heuristic to work around the most visible case --
+        // the empty suffix -- where all files in $PWD are completed/autosuggested.
+        if self.completions[first_from_start..]
+            .iter()
+            .any(|c| !c.replaces_token())
+            && sep_index + 1 == s.len()
+        {
+            return;
+        }
+        let sep_string = s.slice_from(sep_index + 1);
+        let mut local_completions = Vec::new();
+        if matches!(
+            expand_string(
+                sep_string.to_owned(),
+                &mut local_completions,
+                flags,
+                self.ctx,
+                None,
+            )
+            .result,
+            ExpandResultCode::error | ExpandResultCode::overflow
+        ) {
+            FLOGF!(complete, "Error while expanding string '%ls'", sep_string);
+        }
+
+        Self::escape_opening_brackets(&mut local_completions, s);
+        // Any COMPLETE_REPLACES_TOKEN will also stomp the separator. We need to "repair" them by
+        // inserting our separator and prefix.
+        let prefix_with_sep = s.as_char_slice()[..sep_index + 1].into();
+        for comp in &mut local_completions {
+            comp.prepend_token_prefix(prefix_with_sep);
+        }
+        if !self.completions.extend(local_completions) {
+            return;
         }
     }
 
-    fn escape_separators(
-        completions: &mut [Completion],
-        variable_override_prefix: &wstr,
-        append_only: bool,
-        have_token: bool,
-        is_quoted: bool,
-    ) {
-        for c in completions {
-            if is_quoted && !c.replaces_token() {
-                continue;
-            }
-            // clone of completion_apply_to_command_line
-            let add_space = !c.flags.contains(CompleteFlags::NO_SPACE);
-            let no_tilde = c.flags.contains(CompleteFlags::DONT_ESCAPE_TILDES);
-            let mut escape_flags = EscapeFlags::SEPARATORS;
-            if append_only || !add_space || (!c.replaces_token() && have_token) {
-                escape_flags.insert(EscapeFlags::NO_QUOTED);
-            }
-            if no_tilde {
-                escape_flags.insert(EscapeFlags::NO_TILDE);
-            }
-            if c.replaces_token() {
-                c.completion = variable_override_prefix.to_owned()
-                    + &escape_string(&c.completion, EscapeStringStyle::Script(escape_flags))[..];
-            } else {
-                c.completion =
-                    escape_string(&c.completion, EscapeStringStyle::Script(escape_flags));
-            }
-            assert!(!c.flags.contains(CompleteFlags::DONT_ESCAPE));
-            c.flags |= CompleteFlags::DONT_ESCAPE;
-        }
-    }
     /// Complete the specified string as an environment variable.
     /// Returns `true` if this was a variable, so we should stop completion.
     fn complete_variable(&mut self, s: &wstr, start_offset: usize) -> bool {
@@ -1693,20 +1686,17 @@ impl<'ctx> Completer<'ctx> {
                 continue;
             };
 
-            let (comp, flags) = if !r#match.requires_full_replacement() {
+            let mut flags = CompleteFlags::VARIABLE_NAME;
+            let comp = if !r#match.requires_full_replacement() {
                 // Take only the suffix.
-                (
-                    env_name.slice_from(varlen).to_owned(),
-                    CompleteFlags::empty(),
-                )
+                env_name.slice_from(varlen).to_owned()
             } else {
-                let comp = whole_var.slice_to(start_offset).to_owned() + env_name.as_utfstr();
-                let flags = CompleteFlags::REPLACES_TOKEN | CompleteFlags::DONT_ESCAPE;
-                (comp, flags)
+                flags |= CompleteFlags::REPLACES_TOKEN | CompleteFlags::DONT_ESCAPE;
+                whole_var.slice_to(start_offset).to_owned() + env_name.as_utfstr()
             };
 
             let mut desc = WString::new();
-            if self.flags.descriptions && self.flags.autosuggestion {
+            if self.flags.descriptions && !self.flags.autosuggestion {
                 // $history can be huge, don't put all of it in the completion description; see
                 // #6288.
                 if env_name == "history" {
@@ -1817,7 +1807,7 @@ impl<'ctx> Completer<'ctx> {
             // The getpwent() function does not exist on Android. A Linux user on Android isn't
             // really a user - each installed app gets an UID assigned. Listing all UID:s is not
             // possible without root access, and doing a ~USER type expansion does not make sense
-            // since every app is sandboxed and can't access eachother.
+            // since every app is sandboxed and can't access each other.
             return false;
         }
         #[cfg(not(target_os = "android"))]

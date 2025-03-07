@@ -1,8 +1,8 @@
 // Generic output functions.
-use crate::color::RgbColor;
+use crate::color::{self, RgbColor};
 use crate::common::{self, wcs2string_appending};
-use crate::curses::{self, tparm1, Term};
 use crate::env::EnvVar;
+use crate::terminal::{self, tparm1, Term};
 use crate::threads::MainThread;
 use crate::wchar::prelude::*;
 use bitflags::bitflags;
@@ -164,7 +164,7 @@ impl Outputter {
     /// Unconditionally write the color string to the output.
     /// Exported for builtin_set_color's usage only.
     pub fn write_color(&mut self, color: RgbColor, is_fg: bool) -> bool {
-        let Some(term) = curses::term() else {
+        let Some(term) = terminal::term() else {
             return false;
         };
         let term: &Term = &term;
@@ -215,7 +215,7 @@ impl Outputter {
     pub fn set_color(&mut self, mut fg: RgbColor, mut bg: RgbColor) {
         // Test if we have at least basic support for setting fonts, colors and related bits - otherwise
         // just give up...
-        let Some(term) = curses::term() else {
+        let Some(term) = terminal::term() else {
             return;
         };
         let term: &Term = &term;
@@ -351,7 +351,7 @@ impl Outputter {
         if is_dim && !self.was_dim && self.tputs_if_some(enter_dim_mode) {
             self.was_dim = is_dim;
         }
-        // N.B. there is no exit_dim_mode in curses, it's handled by exit_attribute_mode above.
+        // N.B. there is no exit_dim_mode in terminfo, it's handled by exit_attribute_mode above.
 
         if is_reverse && !self.was_reverse {
             // Some terms do not have a reverse mode set, so standout mode is a fallback.
@@ -432,7 +432,7 @@ impl Outputter {
 
     pub fn tputs_bytes(&mut self, str: &[u8]) {
         self.begin_buffering();
-        let _ = self.write(str);
+        let _ = self.write_all(str);
         self.end_buffering();
     }
 
@@ -453,6 +453,35 @@ impl Outputter {
         static STDOUTPUT: MainThread<RefCell<Outputter>> =
             MainThread::new(RefCell::new(Outputter::new_from_fd(libc::STDOUT_FILENO)));
         STDOUTPUT.get()
+    }
+}
+
+pub struct BufferedOuputter<'a>(&'a mut Outputter);
+
+impl<'a> BufferedOuputter<'a> {
+    pub fn new(outputter: &'a mut Outputter) -> Self {
+        outputter.begin_buffering();
+        Self(outputter)
+    }
+}
+
+impl<'a> Drop for BufferedOuputter<'a> {
+    fn drop(&mut self) {
+        self.0.end_buffering();
+    }
+}
+
+impl<'a> Write for BufferedOuputter<'a> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        self.0
+            .write(buf)
+            .expect("Writing to in-memory buffer should never fail");
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        self.0.flush().unwrap();
+        Ok(())
     }
 }
 
@@ -491,8 +520,15 @@ pub fn best_color(candidates: &[RgbColor], support: ColorSupport) -> RgbColor {
 /// Return the internal color code representing the specified color.
 /// TODO: This code should be refactored to enable sharing with builtin_set_color.
 ///       In particular, the argument parsing still isn't fully capable.
-#[allow(clippy::collapsible_else_if)]
 pub fn parse_color(var: &EnvVar, is_background: bool) -> RgbColor {
+    let mut result = parse_color_maybe_none(var, is_background);
+    if result.is_none() {
+        result.typ = color::Type::Normal;
+    }
+    result
+}
+
+pub fn parse_color_maybe_none(var: &EnvVar, is_background: bool) -> RgbColor {
     let mut is_bold = false;
     let mut is_underline = false;
     let mut is_italics = false;
@@ -507,6 +543,7 @@ pub fn parse_color(var: &EnvVar, is_background: bool) -> RgbColor {
     let mut color_name = WString::new();
     for next in var.as_list() {
         color_name.clear();
+        #[allow(clippy::collapsible_else_if)]
         if is_background {
             if color_name.is_empty() && next_is_background {
                 color_name = next.to_owned();
@@ -551,9 +588,6 @@ pub fn parse_color(var: &EnvVar, is_background: bool) -> RgbColor {
     }
 
     let mut result = best_color(&candidates, get_color_support());
-    if result.is_none() {
-        result = RgbColor::NORMAL;
-    }
     result.set_bold(is_bold);
     result.set_underline(is_underline);
     result.set_italics(is_italics);

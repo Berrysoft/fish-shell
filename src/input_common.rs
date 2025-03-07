@@ -2,16 +2,16 @@ use libc::STDOUT_FILENO;
 
 use crate::common::{
     fish_reserved_codepoint, is_windows_subsystem_for_linux, read_blocked, shell_modes,
-    str2wcstring, write_loop, WSL,
+    str2wcstring, write_loop, ScopeGuard, WSL,
 };
 use crate::env::{EnvStack, Environment};
-use crate::fd_readable_set::FdReadableSet;
+use crate::fd_readable_set::{FdReadableSet, Timeout};
 use crate::flog::{FloggableDebug, FLOG};
 use crate::fork_exec::flog_safe::FLOG_SAFE;
 use crate::global_safety::RelaxedAtomicBool;
 use crate::key::{
-    self, alt, canonicalize_control_char, canonicalize_keyed_control_char, ctrl, function_key,
-    shift, Key, Modifiers, ViewportPosition,
+    self, alt, canonicalize_control_char, canonicalize_keyed_control_char, char_to_symbol, ctrl,
+    function_key, shift, Key, Modifiers, ViewportPosition,
 };
 use crate::reader::{reader_current_data, reader_test_and_clear_interrupted};
 use crate::threads::{iothread_port, is_main_thread};
@@ -24,7 +24,9 @@ use std::ops::ControlFlow;
 use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 // The range of key codes for inputrc-style keyboard functions.
 pub const R_END_INPUT_FUNCTIONS: usize = (ReadlineCmd::ReverseRepeatJump as usize) + 1;
@@ -58,11 +60,13 @@ pub enum ReadlineCmd {
     BackwardToken,
     NextdOrForwardWord,
     PrevdOrBackwardWord,
+    HistoryDelete,
     HistorySearchBackward,
     HistorySearchForward,
     HistoryPrefixSearchBackward,
     HistoryPrefixSearchForward,
     HistoryPager,
+    #[deprecated]
     HistoryPagerDelete,
     DeleteChar,
     BackwardDeleteChar,
@@ -122,8 +126,8 @@ pub enum ReadlineCmd {
     ExpandAbbr,
     DeleteOrExit,
     Exit,
+    ClearCommandline,
     CancelCommandline,
-    CancelCommandlineTraditional,
     Cancel,
     Undo,
     Redo,
@@ -190,6 +194,8 @@ pub enum ImplicitEvent {
     FocusOut,
     /// Request to disable mouse tracking.
     DisableMouseTracking,
+    /// Primary DA response.
+    PrimaryDeviceAttribute,
     /// Handle mouse left click.
     MouseLeftClickContinuation(ViewportPosition, ViewportPosition),
     /// Push prompt to top.
@@ -334,9 +340,9 @@ fn readb(in_fd: RawFd, blocking: bool) -> ReadbResult {
 
         // Here's where we call select().
         let select_res = fdset.check_readable(if blocking {
-            FdReadableSet::kNoTimeout
+            Timeout::Forever
         } else {
-            0
+            Timeout::Duration(Duration::from_millis(1))
         });
         if select_res < 0 {
             let err = errno::errno().0;
@@ -368,9 +374,10 @@ fn readb(in_fd: RawFd, blocking: bool) -> ReadbResult {
                 // The terminal has been closed.
                 return ReadbResult::Eof;
             }
-            FLOG!(reader, "Read byte", arr[0]);
+            let c = arr[0];
+            FLOG!(reader, "Read byte", char_to_symbol(char::from(c)));
             // The common path is to return a u8.
-            return ReadbResult::Byte(arr[0]);
+            return ReadbResult::Byte(c);
         }
         if !blocking {
             return ReadbResult::NothingToRead;
@@ -435,40 +442,53 @@ pub fn update_wait_on_sequence_key_ms(vars: &EnvStack) {
 }
 
 static TERMINAL_PROTOCOLS: AtomicBool = AtomicBool::new(false);
+static BRACKETED_PASTE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) static SCROLL_FORWARD_SUPPORTED: RelaxedAtomicBool = RelaxedAtomicBool::new(false);
+pub(crate) static CURSOR_UP_SUPPORTED: RelaxedAtomicBool = RelaxedAtomicBool::new(false);
 
 #[repr(u8)]
-enum Capability {
+pub(crate) enum Capability {
     Unknown,
     Supported,
     NotSupported,
 }
-static KITTY_KEYBOARD_SUPPORTED: AtomicU8 = AtomicU8::new(Capability::Unknown as _);
+pub(crate) static KITTY_KEYBOARD_SUPPORTED: AtomicU8 = AtomicU8::new(Capability::Unknown as _);
 
-macro_rules! kitty_progressive_enhancements {
-    () => {
-        "\x1b[=5u"
-    };
+pub(crate) static SYNCHRONIZED_OUTPUT_SUPPORTED: RelaxedAtomicBool = RelaxedAtomicBool::new(false);
+
+pub(crate) static CURSOR_POSITION_REPORTING_SUPPORTED: RelaxedAtomicBool =
+    RelaxedAtomicBool::new(false);
+
+pub fn kitty_progressive_enhancements_query() -> &'static [u8] {
+    if std::env::var_os("TERM").is_some_and(|term| term.as_os_str().as_bytes() == b"st-256color") {
+        return b"";
+    }
+    b"\x1b[?u"
 }
 
 static IS_TMUX: RelaxedAtomicBool = RelaxedAtomicBool::new(false);
-pub static IN_MIDNIGHT_COMMANDER_PRE_CSI_U: RelaxedAtomicBool = RelaxedAtomicBool::new(false);
-static IN_ITERM_PRE_CSI_U: RelaxedAtomicBool = RelaxedAtomicBool::new(false);
+
+pub(crate) static IN_MIDNIGHT_COMMANDER: RelaxedAtomicBool = RelaxedAtomicBool::new(false);
+pub(crate) static IN_DVTM: RelaxedAtomicBool = RelaxedAtomicBool::new(false);
+static ITERM_NO_KITTY_KEYBOARD: RelaxedAtomicBool = RelaxedAtomicBool::new(false);
 
 pub fn terminal_protocol_hacks() {
     use std::env::var_os;
+    IN_MIDNIGHT_COMMANDER.store(var_os("MC_TMPDIR").is_some());
+    IN_DVTM
+        .store(var_os("TERM").is_some_and(|term| term.as_os_str().as_bytes() == b"dvtm-256color"));
     IS_TMUX.store(var_os("TMUX").is_some());
-    IN_ITERM_PRE_CSI_U.store(
+    ITERM_NO_KITTY_KEYBOARD.store(
         var_os("LC_TERMINAL").is_some_and(|term| term.as_os_str().as_bytes() == b"iTerm2")
             && var_os("LC_TERMINAL_VERSION").is_some_and(|version| {
                 let Some(version) = parse_version(&str2wcstring(version.as_os_str().as_bytes()))
                 else {
                     return false;
                 };
-                version < (3, 5, 6)
+                version < (3, 5, 12)
             }),
     );
-    // Request kitty progressive enhancement value and primary device attribute.
-    let _ = write_loop(&STDOUT_FILENO, b"\x1b[?u\x1b[5n");
 }
 
 fn parse_version(version: &wstr) -> Option<(i64, i64, i64)> {
@@ -491,64 +511,74 @@ fn test_parse_version() {
 }
 
 pub fn terminal_protocols_enable_ifn() {
+    let did_write = RelaxedAtomicBool::new(false);
+    let _save_screen_state = ScopeGuard::new((), |()| {
+        if did_write.load() {
+            reader_current_data().map(|data| data.save_screen_state());
+        }
+    });
+    if !BRACKETED_PASTE.load(Ordering::Relaxed) {
+        BRACKETED_PASTE.store(true, Ordering::Release);
+        let _ = write_loop(&STDOUT_FILENO, b"\x1b[?2004h");
+        if IS_TMUX.load() {
+            let _ = write_loop(&STDOUT_FILENO, "\x1b[?1004h".as_bytes()); // focus reporting
+        }
+        did_write.store(true);
+    }
+    let kitty_keyboard_supported = KITTY_KEYBOARD_SUPPORTED.load(Ordering::Relaxed);
+    if kitty_keyboard_supported == Capability::Unknown as _ {
+        return;
+    }
     if TERMINAL_PROTOCOLS.load(Ordering::Relaxed) {
         return;
     }
     TERMINAL_PROTOCOLS.store(true, Ordering::Release);
-    let sequences = if IN_MIDNIGHT_COMMANDER_PRE_CSI_U.load() {
-        "\x1b[?2004h"
-    } else if IN_ITERM_PRE_CSI_U.load() {
-        concat!("\x1b[?2004h", "\x1b[>4;1m", "\x1b[>5u", "\x1b=",)
-    } else if KITTY_KEYBOARD_SUPPORTED.load(Relaxed) != Capability::Supported as _ {
-        concat!("\x1b[?2004h", "\x1b[>4;1m", "\x1b=",)
+    FLOG!(term_protocols, "Enabling extended keys");
+    if kitty_keyboard_supported == Capability::NotSupported as _ || ITERM_NO_KITTY_KEYBOARD.load() {
+        let _ = write_loop(&STDOUT_FILENO, b"\x1b[>4;1m"); // XTerm's modifyOtherKeys
+        let _ = write_loop(&STDOUT_FILENO, b"\x1b="); // set application keypad mode, so the keypad keys send unique codes
     } else {
-        concat!(
-            "\x1b[?2004h", // Bracketed paste
-            "\x1b[>4;1m",  // XTerm's modifyOtherKeys
-            kitty_progressive_enhancements!(),
-            "\x1b=", // set application keypad mode, so the keypad keys send unique codes
-        )
-    };
-    FLOG!(term_protocols, "Enabling extended keys and bracketed paste");
-    let _ = write_loop(&STDOUT_FILENO, sequences.as_bytes());
-    if IS_TMUX.load() {
-        let _ = write_loop(&STDOUT_FILENO, "\x1b[?1004h".as_bytes());
+        let _ = write_loop(&STDOUT_FILENO, b"\x1b[=5u"); // kitty progressive enhancements
     }
-    reader_current_data().map(|data| data.save_screen_state());
+    did_write.store(true);
 }
 
 pub(crate) fn terminal_protocols_disable_ifn() {
+    let did_write = RelaxedAtomicBool::new(false);
+    let _save_screen_state = is_main_thread().then(|| {
+        ScopeGuard::new((), |()| {
+            if did_write.load() {
+                reader_current_data().map(|data| data.save_screen_state());
+            }
+        })
+    });
+    if BRACKETED_PASTE.load(Ordering::Acquire) {
+        let _ = write_loop(&STDOUT_FILENO, b"\x1b[?2004l");
+        if IS_TMUX.load() {
+            let _ = write_loop(&STDOUT_FILENO, "\x1b[?1004l".as_bytes());
+        }
+        BRACKETED_PASTE.store(false, Ordering::Release);
+        did_write.store(true);
+    }
     if !TERMINAL_PROTOCOLS.load(Ordering::Acquire) {
         return;
     }
-    let sequences = if IN_ITERM_PRE_CSI_U.load() {
-        concat!("\x1b[?2004l", "\x1b[>4;0m", "\x1b[<1u", "\x1b>",)
-    } else if KITTY_KEYBOARD_SUPPORTED.load(Relaxed) != Capability::Supported as _ {
-        concat!("\x1b[?2004l", "\x1b[>4;0m", "\x1b>",)
+    FLOG_SAFE!(term_protocols, "Disabling extended keys");
+    let kitty_keyboard_supported = KITTY_KEYBOARD_SUPPORTED.load(Ordering::Acquire);
+    assert_ne!(kitty_keyboard_supported, Capability::Unknown as _);
+    if kitty_keyboard_supported == Capability::NotSupported as _ || ITERM_NO_KITTY_KEYBOARD.load() {
+        let _ = write_loop(&STDOUT_FILENO, b"\x1b[>4;0m"); // XTerm's modifyOtherKeys
+        let _ = write_loop(&STDOUT_FILENO, b"\x1b>"); // application keypad mode
     } else {
-        concat!(
-            "\x1b[?2004l", // Bracketed paste
-            "\x1b[>4;0m",  // XTerm's modifyOtherKeys
-            "\x1b[=0u",    // CSI u with kitty progressive enhancement
-            "\x1b>",       // application keypad mode
-        )
-    };
-    FLOG_SAFE!(
-        term_protocols,
-        "Disabling extended keys and bracketed paste"
-    );
-    let _ = write_loop(&STDOUT_FILENO, sequences.as_bytes());
-    if IS_TMUX.load() {
-        let _ = write_loop(&STDOUT_FILENO, "\x1b[?1004l".as_bytes());
-    }
-    if is_main_thread() {
-        reader_current_data().map(|data| data.save_screen_state());
+        let _ = write_loop(&STDOUT_FILENO, b"\x1b[=0u"); // kitty progressive enhancements
     }
     TERMINAL_PROTOCOLS.store(false, Ordering::Release);
+    did_write.store(true);
 }
 
 fn parse_mask(mask: u32) -> Modifiers {
     Modifiers {
+        sup: (mask & 8) != 0,
         ctrl: (mask & 4) != 0,
         alt: (mask & 2) != 0,
         shift: (mask & 1) != 0,
@@ -601,9 +631,23 @@ impl InputData {
     }
 }
 
-pub enum WaitingForCursorPosition {
+#[derive(Eq, PartialEq)]
+pub enum CursorPositionWait {
     MouseLeft(ViewportPosition),
     ScrollbackPush,
+}
+
+#[derive(Eq, PartialEq)]
+pub enum Queried {
+    NotYet,
+    Once,
+    Twice,
+}
+
+#[derive(Eq, PartialEq)]
+pub enum BlockingWait {
+    Startup(Queried),
+    CursorPosition(CursorPositionWait),
 }
 
 /// A trait which knows how to produce a stream of input events.
@@ -611,10 +655,10 @@ pub enum WaitingForCursorPosition {
 pub trait InputEventQueuer {
     /// Return the next event in the queue, or none if the queue is empty.
     fn try_pop(&mut self) -> Option<CharEvent> {
-        if self.is_waiting_for_cursor_position() {
+        if self.is_blocked() {
             match self.get_input_data().queue.front()? {
                 CharEvent::Key(_) | CharEvent::Readline(_) | CharEvent::Command(_) => {
-                    return None; // No code execution while we're waiting for CPR.
+                    return None; // No code execution while blocked.
                 }
                 CharEvent::Implicit(_) => (),
             }
@@ -738,10 +782,10 @@ pub trait InputEventQueuer {
                             Some(seq.chars().skip(1).map(CharEvent::from_char)),
                         )
                     };
-                    if self.is_waiting_for_cursor_position() {
+                    if self.is_blocked() {
                         FLOG!(
                             reader,
-                            "Still waiting for cursor position report from terminal, deferring key event",
+                            "Still blocked on response from terminal, deferring key event",
                             key_evt
                         );
                         self.push_back(key_evt);
@@ -754,9 +798,9 @@ pub trait InputEventQueuer {
                         if vintr != 0 && key == Some(Key::from_single_byte(vintr)) {
                             FLOG!(
                                 reader,
-                                "Received interrupt key, giving up waiting for cursor position"
+                                "Received interrupt key, giving up waiting for response from terminal"
                             );
-                            let ok = self.stop_waiting_for_cursor_position();
+                            let ok = unblock_input(self.blocking_wait());
                             assert!(ok);
                         }
                         continue;
@@ -782,6 +826,8 @@ pub trait InputEventQueuer {
         buffer: &mut Vec<u8>,
         have_escape_prefix: &mut bool,
     ) -> Option<Key> {
+        assert!(buffer.len() <= 2);
+        let recursive_invocation = buffer.len() == 2;
         let Some(next) = self.try_readb(buffer) else {
             if !self.paste_is_buffering() {
                 return Some(Key::from_raw(key::Escape));
@@ -789,7 +835,7 @@ pub trait InputEventQueuer {
             return None;
         };
         let invalid = Key::from_raw(key::Invalid);
-        if buffer.len() == 2 && next == b'\x1b' {
+        if recursive_invocation && next == b'\x1b' {
             return Some(
                 match self.parse_escape_sequence(buffer, have_escape_prefix) {
                     Some(mut nested_sequence) => {
@@ -810,6 +856,10 @@ pub trait InputEventQueuer {
         if next == b'O' {
             // potential SS3
             return Some(self.parse_ss3(buffer).unwrap_or(invalid));
+        }
+        if !recursive_invocation && next == b'P' {
+            // potential DCS
+            return Some(self.parse_dcs(buffer).unwrap_or(invalid));
         }
         match canonicalize_control_char(next) {
             Some(mut key) => {
@@ -910,9 +960,13 @@ pub trait InputEventQueuer {
         while count < 16 && c >= 0x30 && c <= 0x3f {
             if c.is_ascii_digit() {
                 // Return None on invalid ascii numeric CSI parameter exceeding u32 bounds
-                params[count][subcount] = params[count][subcount]
+                match params[count][subcount]
                     .checked_mul(10)
-                    .and_then(|result| result.checked_add(u32::from(c - b'0')))?;
+                    .and_then(|result| result.checked_add(u32::from(c - b'0')))
+                {
+                    Some(c) => params[count][subcount] = c,
+                    None => return invalid_sequence(buffer),
+                };
             } else if c == b':' && subcount < 3 {
                 subcount += 1;
             } else if c == b';' {
@@ -945,8 +999,15 @@ pub trait InputEventQueuer {
 
         let key = match c {
             b'$' => {
-                if private_mode == Some(b'?') && next_char(self) == b'y' {
-                    // DECRPM
+                if next_char(self) == b'y' {
+                    if private_mode == Some(b'?') {
+                        // DECRPM
+                        if params[0][0] == 2026 && matches!(params[1][0], 1 | 2) {
+                            FLOG!(reader, "Synchronized output is supported");
+                            SYNCHRONIZED_OUTPUT_SUPPORTED.store(true);
+                        }
+                    }
+                    // DECRQM
                     return None;
                 }
                 match params[0][0] {
@@ -972,42 +1033,50 @@ pub trait InputEventQueuer {
                 if !sgr && c == b'm' {
                     return None;
                 }
-                let button = if sgr {
-                    params[0][0]
+                let Some(button) = (if sgr {
+                    Some(params[0][0])
                 } else {
-                    u32::from(next_char(self)) - 32
+                    u32::from(next_char(self)).checked_sub(32)
+                }) else {
+                    return invalid_sequence(buffer);
                 };
-                let x = usize::try_from(
-                    if sgr {
-                        params[1][0]
+                let mut convert = |param| {
+                    (if sgr {
+                        Some(param)
                     } else {
-                        u32::from(next_char(self)) - 32
-                    } - 1,
-                )
-                .unwrap();
-                let y = usize::try_from(
-                    if sgr {
-                        params[2][0]
-                    } else {
-                        u32::from(next_char(self)) - 32
-                    } - 1,
-                )
-                .unwrap();
+                        u32::from(next_char(self)).checked_sub(32)
+                    })
+                    .and_then(|coord| coord.checked_sub(1))
+                    .and_then(|coord| usize::try_from(coord).ok())
+                };
+                let Some(x) = convert(params[1][0]) else {
+                    return invalid_sequence(buffer);
+                };
+                let Some(y) = convert(params[2][0]) else {
+                    return invalid_sequence(buffer);
+                };
                 let position = ViewportPosition { x, y };
                 let modifiers = parse_mask((button >> 2) & 0x07);
                 let code = button & 0x43;
                 if code != 0 || c != b'M' || modifiers.is_some() {
                     return None;
                 }
-                if self.is_waiting_for_cursor_position() {
-                    // TODO: re-queue it I guess.
-                    FLOG!(
-                        reader,
-                        "Received mouse left click while still waiting for Cursor Position Report"
-                    );
+                let wait_guard = self.blocking_wait();
+                let Some(wait) = &*wait_guard else {
+                    drop(wait_guard);
+                    self.on_mouse_left_click(position);
                     return None;
+                };
+                match wait {
+                    BlockingWait::Startup(_) => {}
+                    BlockingWait::CursorPosition(_) => {
+                        // TODO: re-queue it I guess.
+                        FLOG!(
+                                reader,
+                                "Ignoring mouse left click received while still waiting for Cursor Position Report"
+                            );
+                    }
                 }
-                self.on_mouse_left_click(position);
                 return None;
             }
             b't' => {
@@ -1028,21 +1097,36 @@ pub trait InputEventQueuer {
             b'P' => masked_key(function_key(1), None),
             b'Q' => masked_key(function_key(2), None),
             b'R' => {
-                let wait_reason = self.cursor_position_wait_reason().as_ref()?;
-                let y = usize::try_from(params[0][0] - 1).unwrap();
-                let x = usize::try_from(params[1][0] - 1).unwrap();
+                let Some(y) = params[0][0]
+                    .checked_sub(1)
+                    .and_then(|y| usize::try_from(y).ok())
+                else {
+                    return invalid_sequence(buffer);
+                };
+                let Some(x) = params[1][0]
+                    .checked_sub(1)
+                    .and_then(|x| usize::try_from(x).ok())
+                else {
+                    return invalid_sequence(buffer);
+                };
                 FLOG!(reader, "Received cursor position report y:", y, "x:", x);
-                let continuation = match wait_reason {
-                    WaitingForCursorPosition::MouseLeft(click_position) => {
+                let wait_guard = self.blocking_wait();
+                let Some(BlockingWait::CursorPosition(wait)) = &*wait_guard else {
+                    CURSOR_POSITION_REPORTING_SUPPORTED.store(true);
+                    return None;
+                };
+                let continuation = match wait {
+                    CursorPositionWait::MouseLeft(click_position) => {
                         ImplicitEvent::MouseLeftClickContinuation(
                             ViewportPosition { x, y },
                             *click_position,
                         )
                     }
-                    WaitingForCursorPosition::ScrollbackPush => {
+                    CursorPositionWait::ScrollbackPush => {
                         ImplicitEvent::ScrollbackPushContinuation(y)
                     }
                 };
+                drop(wait_guard);
                 self.push_front(CharEvent::Implicit(continuation));
                 return None;
             }
@@ -1095,24 +1179,24 @@ pub trait InputEventQueuer {
                 }
                 _ => return None,
             },
+            b'c' if private_mode == Some(b'?') => {
+                self.push_front(CharEvent::Implicit(ImplicitEvent::PrimaryDeviceAttribute));
+                return None;
+            }
             b'u' => {
                 if private_mode == Some(b'?') {
                     FLOG!(
                         reader,
                         "Received kitty progressive enhancement flags, marking as supported"
                     );
-                    KITTY_KEYBOARD_SUPPORTED.store(Capability::Supported as _, Relaxed);
-                    if !IN_MIDNIGHT_COMMANDER_PRE_CSI_U.load() && !IN_ITERM_PRE_CSI_U.load() {
-                        let _ = write_loop(
-                            &STDOUT_FILENO,
-                            kitty_progressive_enhancements!().as_bytes(),
-                        );
-                    }
+                    KITTY_KEYBOARD_SUPPORTED.store(Capability::Supported as _, Ordering::Release);
                     return None;
                 }
 
                 // Treat numpad keys the same as their non-numpad counterparts. Could add a numpad modifier here.
                 let key = match params[0][0] {
+                    57361 => key::PrintScreen,
+                    57363 => key::Menu,
                     57399 => '0',
                     57400 => '1',
                     57401 => '2',
@@ -1156,16 +1240,6 @@ pub trait InputEventQueuer {
             }
             b'O' => {
                 self.push_front(CharEvent::Implicit(ImplicitEvent::FocusOut));
-                return None;
-            }
-            b'n' => {
-                if KITTY_KEYBOARD_SUPPORTED.load(Relaxed) == Capability::Unknown as _ {
-                    FLOG!(
-                        reader,
-                        "Did not receive kitty progressive enhancement flags, marking as unsupported"
-                    );
-                    KITTY_KEYBOARD_SUPPORTED.store(Capability::NotSupported as _, Relaxed);
-                }
                 return None;
             }
             _ => return None,
@@ -1232,6 +1306,93 @@ pub trait InputEventQueuer {
             _ => return None,
         };
         Some(key)
+    }
+
+    fn parse_xtversion(&mut self, buffer: &mut Vec<u8>) {
+        assert!(buffer.len() == 3);
+        loop {
+            match self.try_readb(buffer) {
+                None => return,
+                Some(b'\x1b') => break,
+                Some(_) => continue,
+            }
+        }
+        if self.try_readb(buffer) != Some(b'\\') {
+            return;
+        }
+        if buffer[3] != b'|' {
+            return;
+        }
+        FLOG!(
+            reader,
+            format!(
+                "Received XTVERSION response: {}",
+                str2wcstring(&buffer[4..buffer.len() - 2]),
+            )
+        );
+    }
+
+    fn parse_dcs(&mut self, buffer: &mut Vec<u8>) -> Option<Key> {
+        assert!(buffer.len() == 2);
+        let Some(success) = self.try_readb(buffer) else {
+            return Some(alt('P'));
+        };
+        let success = match success {
+            b'0' => false,
+            b'1' => true,
+            b'>' => {
+                self.parse_xtversion(buffer);
+                return None;
+            }
+            _ => return None,
+        };
+        if self.try_readb(buffer)? != b'+' {
+            return None;
+        }
+        if self.try_readb(buffer)? != b'r' {
+            return None;
+        }
+        while self.try_readb(buffer)? != b'\x1b' {}
+        if self.try_readb(buffer)? != b'\\' {
+            return None;
+        }
+        buffer.pop();
+        buffer.pop();
+        // \e P 1 r + Pn ST
+        // \e P 0 r + msg ST
+        let buffer = &buffer[5..];
+        if !success {
+            FLOG!(
+                reader,
+                format!(
+                    "Received XTGETTCAP failure response: {}",
+                    str2wcstring(&parse_hex(buffer)?),
+                )
+            );
+            return None;
+        }
+        let mut buffer = buffer.splitn(2, |&c| c == b'=');
+        let key = buffer.next().unwrap();
+        let value = buffer.next()?;
+        let key = parse_hex(key)?;
+        let value = parse_hex(value)?;
+        FLOG!(
+            reader,
+            format!(
+                "Received XTGETTCAP response: {}={:?}",
+                str2wcstring(&key),
+                str2wcstring(&value)
+            )
+        );
+        if key == b"indn" && matches!(&value[..], b"\x1b[%p1%dS" | b"\\E[%p1%dS") {
+            SCROLL_FORWARD_SUPPORTED.store(true);
+            FLOG!(reader, "Scroll forward is supported");
+        }
+        if key == b"cuu" && matches!(&value[..], b"\x1b[%p1%dA" | b"\\E[%p1%dA") {
+            CURSOR_UP_SUPPORTED.store(true);
+            FLOG!(reader, "Cursor up is supported");
+        }
+        return None;
     }
 
     fn readch_timed_esc(&mut self) -> Option<CharEvent> {
@@ -1406,15 +1567,14 @@ pub trait InputEventQueuer {
         }
     }
 
-    fn is_waiting_for_cursor_position(&self) -> bool {
+    fn blocking_wait(&self) -> MutexGuard<Option<BlockingWait>> {
+        static NO_WAIT: Mutex<Option<BlockingWait>> = Mutex::new(None);
+        NO_WAIT.lock().unwrap()
+    }
+    fn is_blocked(&self) -> bool {
         false
     }
-    fn cursor_position_wait_reason(&self) -> &Option<WaitingForCursorPosition> {
-        &None
-    }
-    fn stop_waiting_for_cursor_position(&mut self) -> bool {
-        false
-    }
+
     fn on_mouse_left_click(&mut self, _position: ViewportPosition) {}
 
     /// Override point for when we are about to (potentially) block in select(). The default does
@@ -1428,10 +1588,10 @@ pub trait InputEventQueuer {
         let vintr = shell_modes().c_cc[libc::VINTR];
         if vintr != 0 {
             let interrupt_evt = CharEvent::from_key(Key::from_single_byte(vintr));
-            if self.stop_waiting_for_cursor_position() {
+            if unblock_input(self.blocking_wait()) {
                 FLOG!(
                     reader,
-                    "Received interrupt, giving up on waiting for cursor position"
+                    "Received interrupt, giving up on waiting for terminal response"
                 );
                 self.push_back(interrupt_evt);
             } else {
@@ -1456,6 +1616,37 @@ pub trait InputEventQueuer {
     /// Return if we have any lookahead.
     fn has_lookahead(&self) -> bool {
         !self.get_input_data().queue.is_empty()
+    }
+}
+
+pub(crate) fn unblock_input(mut wait_guard: MutexGuard<Option<BlockingWait>>) -> bool {
+    if wait_guard.is_none() {
+        return false;
+    }
+    *wait_guard = None;
+    true
+}
+
+fn invalid_sequence(buffer: &[u8]) -> Option<Key> {
+    FLOG!(
+        reader,
+        "Error: invalid escape sequence: ",
+        DisplayBytes(buffer)
+    );
+    None
+}
+
+struct DisplayBytes<'a>(&'a [u8]);
+
+impl<'a> std::fmt::Display for DisplayBytes<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (i, &c) in self.0.iter().enumerate() {
+            if i != 0 {
+                write!(f, " ")?;
+            }
+            write!(f, "{}", char_to_symbol(char::from(c)))?;
+        }
+        Ok(())
     }
 }
 
@@ -1486,4 +1677,25 @@ impl InputEventQueuer for InputEventQueue {
             self.enqueue_interrupt_key();
         }
     }
+}
+
+fn parse_hex(hex: &[u8]) -> Option<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    let mut result = vec![0; hex.len() / 2];
+    let mut i = 0;
+    while i < hex.len() {
+        let d1 = char::from(hex[i]).to_digit(16)?;
+        let d2 = char::from(hex[i + 1]).to_digit(16)?;
+        let decoded = u8::try_from(16 * d1 + d2).unwrap();
+        result[i / 2] = decoded;
+        i += 2;
+    }
+    Some(result)
+}
+
+#[test]
+fn test_parse_hex() {
+    assert_eq!(parse_hex(&[b'3', b'd']), Some(vec![61]));
 }

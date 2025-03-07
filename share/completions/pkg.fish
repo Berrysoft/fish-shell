@@ -169,7 +169,7 @@ complete -c pkg -n '__fish_pkg_is list' -xa '(pkg query "%n")'
 complete -c pkg -n '__fish_pkg_is add update' -s f -l force -d "Force a full download of a repository"
 
 # alias 
-set -l with_packge_names all-depends annotations build-depends cinfo comment csearch desc iinfo isearch \
+set -l with_package_names all-depends annotations build-depends cinfo comment csearch desc iinfo isearch \
     list options origin provided-depends roptions shared-depends show size
 
 for alias in (pkg alias -lq)
@@ -193,7 +193,7 @@ function __fish_pkg_aliases
                 set description 'Display build dependencies for a given package'
 
             case cinfo
-                set description 'Display install package matching case-sensitve regex'
+                set description 'Display install package matching case-sensitive regex'
 
             case comment
                 set description 'Display comment off a package'
@@ -205,7 +205,7 @@ function __fish_pkg_aliases
                 set description 'Show package description'
 
             case iinfo
-                set description 'Display install package matching case-insensitve regex'
+                set description 'Display install package matching case-insensitive regex'
 
             case isearch
                 set description 'Finds package using case-insensitive search'

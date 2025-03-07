@@ -20,10 +20,11 @@ Description
 ``bind`` manages key bindings.
 
 If both ``KEYS`` and ``COMMAND`` are given, ``bind`` adds (or replaces) a binding in ``MODE``.
-If only ``KEYS`` is given, any existing binding in the given ``MODE`` will be printed.
+If only ``KEYS`` is given, any existing binding for those keys in the given ``MODE`` will be printed.
+If no ``KEYS`` argument is provided, all bindings (in the given ``MODE``) are printed.
 
 ``KEYS`` is a comma-separated list of key names.
-Modifier keys can be specified by prefixing a key name with a combination of ``ctrl-``, ``alt-`` and ``shift-``.
+Modifier keys can be specified by prefixing a key name with a combination of ``ctrl-``, ``alt-``, ``shift-`` and ``super-`` (i.e. the "windows" or "command" key).
 For example, pressing :kbd:`w` while holding the Alt modifier is written as ``alt-w``.
 Key names are case-sensitive; for example ``alt-W`` is the same as ``alt-shift-w``.
 ``ctrl-x,ctrl-e`` would mean pressing :kbd:`ctrl-x` followed by :kbd:`ctrl-e`.
@@ -58,9 +59,7 @@ To find the name of a key combination you can use :doc:`fish_key_reader <fish_ke
 .. note::
     If a script changes the commandline, it should finish by calling the ``repaint`` special input function.
 
-If no ``KEYS`` argument is provided, all bindings (in the given ``MODE``) are printed. If ``KEYS`` is provided but no ``COMMAND``, just the binding matching that sequence is printed.
-
-Key bindings may use "modes", which mimics vi's modal input behavior. The default mode is "default". Every key binding applies to a single mode; you can specify which one with ``-M MODE``. If the key binding should change the mode, you can specify the new mode with ``-m NEW_MODE``. The mode can be viewed and changed via the ``$fish_bind_mode`` variable. If you want to change the mode from inside a fish function, use ``set fish_bind_mode MODE``.
+Key bindings may use "modes", which mimics vi's modal input behavior. The default mode is "default" (in vi-mode, that's vi's "normal" mode). Every key binding applies to a single mode; you can specify which one with ``-M MODE``. If the key binding should change the mode, you can specify the new mode with ``-m NEW_MODE``. The mode can be viewed and changed via the ``$fish_bind_mode`` variable. If you want to change the mode from inside a fish function, use ``set fish_bind_mode MODE``.
 
 To save custom key bindings, put the ``bind`` statements into :ref:`config.fish <configuration>`. Alternatively, fish also automatically executes a function called ``fish_user_key_bindings`` if it exists.
 
@@ -75,7 +74,9 @@ The following options are available:
     Display a list of defined bind modes
 
 **-M MODE** or **--mode** *MODE*
-    Specify a bind mode that the bind is used in. Defaults to "default"
+    Specify a bind mode that the bind is used in. Defaults to "default".
+    If you use :ref:`vi bindings <vi-mode>`, that's the *command* mode,
+    what vi calls "normal" mode.
 
 **-m NEW_MODE** or **--sets-mode** *NEW_MODE*
     Change the current mode to *NEW_MODE* after this binding is executed
@@ -162,13 +163,16 @@ The following special input functions are available:
     start selecting text
 
 ``cancel``
-    cancel the current commandline and replace it with a new empty one
+    close the pager if it is open, or undo the most recent completion if one was just inserted, or otherwise cancel the current commandline and replace it with a new empty one
 
 ``cancel-commandline``
     cancel the current commandline and replace it with a new empty one, leaving the old one in place with a marker to show that it was cancelled
 
 ``capitalize-word``
     make the current word begin with a capital letter
+
+``clear-commandline``
+    empty the entire commandline
 
 ``clear-screen``
     clears the screen and redraws the prompt.
@@ -240,7 +244,7 @@ The following special input functions are available:
 ``history-pager``
     invoke the searchable pager on history (incremental search); or if the history pager is already active, search further backwards in time.
 
-``history-pager-delete``
+``history-delete``
     permanently delete the current history item, either from the history pager or from an active up-arrow history search
 
 ``history-search-backward``
@@ -262,7 +266,7 @@ The following special input functions are available:
     search the history for the next matching argument
 
 ``forward-jump`` and ``backward-jump``
-    read another character and jump to its next occurence after/before the cursor
+    read another character and jump to its next occurrence after/before the cursor
 
 ``forward-jump-till`` and ``backward-jump-till``
     jump to right *before* the next occurrence
@@ -272,7 +276,7 @@ The following special input functions are available:
 
 ``jump-to-matching-bracket``
     jump to matching bracket if the character under the cursor is bracket;
-    otherwise, jump to the next occurence of *any right* bracket after the cursor.
+    otherwise, jump to the next occurrence of *any right* bracket after the cursor.
     The following brackets are considered: ``([{}])``
 
 ``jump-till-matching-bracket``
@@ -295,7 +299,7 @@ The following special input functions are available:
     move the selected text to the killring
 
 ``kill-whole-line``
-    move the line (including the following newline) to the killring. If the line is the last line, its preceeding newline is also removed
+    move the line (including the following newline) to the killring. If the line is the last line, its preceding newline is also removed
 
 ``kill-inner-line``
     move the line (without the following newline) to the killring

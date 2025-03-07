@@ -1,4 +1,4 @@
-#RUN: fish=%fish %fish %s | %fish %filter-control-sequences
+#RUN: fish=%fish %fish %s
 
 $fish -c "echo 1.2.3.4."
 # CHECK: 1.2.3.4.
@@ -110,6 +110,9 @@ $fish --no-config -c 'echo notprinted | and true'
 # CHECKERR: fish: The 'and' command can not be used in a pipeline
 # CHECKERR: echo notprinted | and true
 # CHECKERR:                   ^~^
+
+$fish --no-config --features
+# CHECKERR: fish: --features: option requires an argument
 
 # Regression test for a hang.
 echo "set -L" | $fish > /dev/null
