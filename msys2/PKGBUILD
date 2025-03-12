@@ -35,6 +35,8 @@ build() {
     -DCMAKE_INSTALL_SYSCONFDIR=/etc \
     -DCMAKE_BUILD_TYPE=Release \
     -DRust_CARGO_TARGET=x86_64-pc-cygwin \
+    -DRust_CARGO=$CARGO \
+    -DRust_COMPILER=$RUSTC \
     -DBUILD_DOCS=True \
     -Wno-dev
 

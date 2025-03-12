@@ -108,6 +108,5 @@ clippy.needless_return = "allow"
 clippy.needless_lifetimes = "allow"
 
 [patch.crates-io]
-libc = { git = "https://github.com/Berrysoft/libc.git", branch = "dev/cygwin" }
 nix = { git = "https://github.com/Berrysoft/nix.git", rev = "b97de9a4c170d25cbc7019953305ddbc4246d1a5" }
-errno = { git = "https://github.com/Berrysoft/rust-errno.git", branch = "dev/cygwin" }
+errno = { git = "https://github.com/lambda-fairy/rust-errno.git" }
